@@ -21,7 +21,7 @@ import torchaudio
 from librosa.filters import mel as librosa_mel_fn
 from x_transformers.x_transformers import apply_rotary_pos_emb
 
-from core.utils import is_package_available
+from .utils import is_package_available
 
 
 # raw wav to mel spec

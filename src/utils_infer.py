@@ -26,9 +26,9 @@ from pydub import AudioSegment, silence
 from vocos import Vocos
 from vocos.feature_extractors import EncodecFeatures
 
-from core.cfm import CFM
-from core.dit import DiT
-from core.utils import get_tokenizer
+from .core.cfm import CFM
+from .core.dit import DiT
+from .core.utils import get_tokenizer
 
 
 device = (

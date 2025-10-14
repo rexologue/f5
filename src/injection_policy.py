@@ -8,7 +8,7 @@ import torch.nn as nn
 import deepspeed
 
 # === Ваши блоки ===
-from core.modules import Attention, FeedForward, DiTBlock
+from .core.modules import Attention, FeedForward, DiTBlock
 
 # ------------------------------------------------------------
 # 1) ВСПОМОГАТЕЛЬНОЕ: алиасы и валидация путей для TP-фолбэка

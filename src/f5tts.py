@@ -7,7 +7,7 @@ import tqdm
 import torch
 import soundfile as sf
 
-from utils_infer import (
+from .utils_infer import (
     infer_process,
     load_model,
     load_vocoder,
@@ -16,10 +16,10 @@ from utils_infer import (
     save_spectrogram,
 )
 
-from core.utils import seed_everything
-from settings.structure import load_settings
+from .core.utils import seed_everything
+from .settings.structure import load_settings
 
-from injection_policy import wrap_with_deepspeed_inference, ds_add_aliases
+from .injection_policy import wrap_with_deepspeed_inference, ds_add_aliases
 
 class F5TTS:
     def __init__(

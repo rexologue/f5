@@ -32,8 +32,8 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 
 # В проекте это внутренние модули:
-from core.modules import MelSpec
-from core.utils import (
+from .modules import MelSpec
+from .utils import (
     default,             # default(x, y) -> x if exists(x) else y
     exists,              # exists(x)     -> x is not None
     get_epss_timesteps,  # эмпирически подобранная сетка времени для малого NFE

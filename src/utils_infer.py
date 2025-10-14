@@ -1,11 +1,10 @@
 # A unified script for inference process
 # Make adjustments inside functions, and consider both gradio and cli scripts if need to change func output format
-import os
 import re
-import sys
-import hashlib
 import tempfile
 from pathlib import Path
+from typing import Literal 
+from collections import defaultdict
 from importlib.resources import files
 from concurrent.futures import ThreadPoolExecutor
 
@@ -22,15 +21,15 @@ from huggingface_hub import hf_hub_download
 import tqdm
 import torchaudio
 import numpy as np
-from vocos import Vocos
 from pydub import AudioSegment, silence
 
+from vocos import Vocos
+from vocos.feature_extractors import EncodecFeatures
+
 from core.cfm import CFM
+from core.dit import DiT
 from core.utils import get_tokenizer
 
-
-_ref_audio_cache = {}
-_ref_text_cache = {}
 
 device = (
     "cuda"
@@ -41,8 +40,6 @@ device = (
     if torch.backends.mps.is_available()
     else "cpu"
 )
-
-tempfile_kwargs = {"delete_on_close": False} if sys.version_info >= (3, 12) else {"delete": False}
 
 # -----------------------------------------
 
@@ -63,6 +60,35 @@ fix_duration = None
 
 # -----------------------------------------
 
+def chunk_text(text, max_chars=135):
+    """
+    Splits the input text into chunks, each with a maximum number of characters.
+
+    Args:
+        text (str): The text to be split.
+        max_chars (int): The maximum number of characters per chunk.
+
+    Returns:
+        List[str]: A list of text chunks.
+    """
+    chunks = []
+    current_chunk = ""
+    # Split the text into sentences based on punctuation followed by whitespace
+    sentences = re.split(r"(?<=[;:,.!?])\s+|(?<=[；：，。！？])", text)
+
+    for sentence in sentences:
+        if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
+            current_chunk += sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
+        else:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
+
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
+    return chunks
+
 
 ################
 # LOAD VOCODER #
@@ -70,29 +96,15 @@ fix_duration = None
 
 
 def load_vocoder(
-        local_path: Path | None = None, 
+        local_path: Path, 
         device=device, 
-        hf_cache_dir=None
     ) -> Vocos:
 
-    if local_path:
-        print(f"Load vocos from local path {local_path}")
+    config_path = local_path / "config.yaml"
+    model_path = local_path/ "pytorch_model.bin"
 
-        config_path = f"{local_path}/config.yaml"
-        model_path = f"{local_path}/pytorch_model.bin"
-
-    else:
-        print("Download Vocos from huggingface charactr/vocos-mel-24khz")
-
-        repo_id = "charactr/vocos-mel-24khz"
-
-        config_path = hf_hub_download(repo_id=repo_id, cache_dir=hf_cache_dir, filename="config.yaml")
-        model_path = hf_hub_download(repo_id=repo_id, cache_dir=hf_cache_dir, filename="pytorch_model.bin")
-
-    vocoder = Vocos.from_hparams(config_path)
+    vocoder = Vocos.from_hparams(str(config_path))
     state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
-
-    from vocos.feature_extractors import EncodecFeatures
 
     if isinstance(vocoder.feature_extractor, EncodecFeatures):
         encodec_parameters = {
@@ -130,7 +142,7 @@ def load_checkpoint(
 
     model = model.to(dtype)
 
-    ckpt_type = ckpt_path.split(".")[-1]
+    ckpt_type = str(ckpt_path).split(".")[-1]
 
     if ckpt_type == "safetensors":
         from safetensors.torch import load_file
@@ -172,11 +184,16 @@ def load_checkpoint(
 
 
 def load_model(
-    model_cls: nn.Module,
     model_cfg: dict,
     ckpt_path: Path,
     vocab_file: Path,
-    ode_method=ode_method,
+    ode_method: Literal["euler", "midpoint"],
+    n_fft: int,
+    hop_length: int,
+    win_length: int,
+    n_mel_channels: int,
+    target_sample_rate: int,
+    *,
     use_ema=True,
     device=device,
 ):
@@ -184,7 +201,7 @@ def load_model(
     vocab_char_map, vocab_size = get_tokenizer(vocab_file)
 
     model = CFM(
-        transformer=model_cls(**model_cfg, text_num_embeds=vocab_size, mel_dim=n_mel_channels),
+        transformer=DiT(**model_cfg, text_num_embeds=vocab_size, mel_dim=n_mel_channels),
 
         mel_spec_kwargs=dict(
             n_fft=n_fft,
@@ -228,83 +245,52 @@ def remove_silence_edges(audio, silence_threshold=-42):
 
 def preprocess_ref_audio_text(
         ref_audio_orig: Path, 
-        ref_text, 
+        ref_text: str,
         show_info=print
-    ):
+    ) -> tuple[str, str]:
 
-    show_info("Converting audio...")
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete_on_close=False) as f: 
+        temp_path = f.name
 
-    # Compute a hash of the reference audio file
-    with open(ref_audio_orig, "rb") as audio_file:
-        audio_data = audio_file.read()
-        audio_hash = hashlib.md5(audio_data).hexdigest()
+    aseg = AudioSegment.from_file(ref_audio_orig)
 
-    global _ref_audio_cache
+    # 1. try to find long silence for clipping
+    non_silent_segs = silence.split_on_silence(
+        aseg, min_silence_len=1000, silence_thresh=-50, keep_silence=1000, seek_step=10
+    )
+    non_silent_wave = AudioSegment.silent(duration=0)
 
-    if audio_hash in _ref_audio_cache:
-        show_info("Using cached preprocessed reference audio...")
-        ref_audio = _ref_audio_cache[audio_hash]
+    for non_silent_seg in non_silent_segs:
+        if len(non_silent_wave) > 6000 and len(non_silent_wave + non_silent_seg) > 12000:
+            show_info("Audio is over 12s, clipping short. (1)")
+            break
 
-    else:  # first pass, do preprocess
-        with tempfile.NamedTemporaryFile(suffix=".wav", **tempfile_kwargs) as f:
-            temp_path = f.name
+        non_silent_wave += non_silent_seg
 
-        aseg = AudioSegment.from_file(ref_audio_orig)
-
-        # 1. try to find long silence for clipping
+    # 2. try to find short silence for clipping if 1. failed
+    if len(non_silent_wave) > 12000:
         non_silent_segs = silence.split_on_silence(
-            aseg, min_silence_len=1000, silence_thresh=-50, keep_silence=1000, seek_step=10
+            aseg, min_silence_len=100, silence_thresh=-40, keep_silence=1000, seek_step=10
         )
-        non_silent_wave = AudioSegment.silent(duration=0)
 
+        non_silent_wave = AudioSegment.silent(duration=0)
         for non_silent_seg in non_silent_segs:
             if len(non_silent_wave) > 6000 and len(non_silent_wave + non_silent_seg) > 12000:
-                show_info("Audio is over 12s, clipping short. (1)")
+                show_info("Audio is over 12s, clipping short. (2)")
                 break
 
             non_silent_wave += non_silent_seg
 
-        # 2. try to find short silence for clipping if 1. failed
-        if len(non_silent_wave) > 12000:
-            non_silent_segs = silence.split_on_silence(
-                aseg, min_silence_len=100, silence_thresh=-40, keep_silence=1000, seek_step=10
-            )
+    aseg = non_silent_wave
 
-            non_silent_wave = AudioSegment.silent(duration=0)
-            for non_silent_seg in non_silent_segs:
-                if len(non_silent_wave) > 6000 and len(non_silent_wave + non_silent_seg) > 12000:
-                    show_info("Audio is over 12s, clipping short. (2)")
-                    break
+    # 3. if no proper silence found for clipping
+    if len(aseg) > 12000:
+        aseg = aseg[:12000]
+        show_info("Audio is over 12s, clipping short. (3)")
 
-                non_silent_wave += non_silent_seg
-
-        aseg = non_silent_wave
-
-        # 3. if no proper silence found for clipping
-        if len(aseg) > 12000:
-            aseg = aseg[:12000]
-            show_info("Audio is over 12s, clipping short. (3)")
-
-        aseg = remove_silence_edges(aseg) + AudioSegment.silent(duration=50)
-        aseg.export(temp_path, format="wav")
-        ref_audio = temp_path
-
-        # Cache the processed reference audio
-        _ref_audio_cache[audio_hash] = ref_audio
-
-    if not ref_text.strip():
-        global _ref_text_cache
-        if audio_hash in _ref_text_cache:
-            # Use cached asr transcription
-            show_info("Using cached reference text...")
-            ref_text = _ref_text_cache[audio_hash]
-        else:
-            show_info("No reference text provided, transcribing reference audio...")
-            ref_text = transcribe(ref_audio)
-            # Cache the transcribed text (not caching custom ref_text, enabling users to do manual tweak)
-            _ref_text_cache[audio_hash] = ref_text
-    else:
-        show_info("Using custom reference text...")
+    aseg = remove_silence_edges(aseg) + AudioSegment.silent(duration=50)
+    aseg.export(temp_path, format="wav")
+    ref_audio = temp_path
 
     # Ensure ref_text ends with a proper sentence-ending punctuation
     if not ref_text.endswith(". ") and not ref_text.endswith("。"):
@@ -313,13 +299,10 @@ def preprocess_ref_audio_text(
         else:
             ref_text += ". "
 
-    print("\nref_text  ", ref_text)
-
     return ref_audio, ref_text
 
 
 # infer process: chunk text -> infer batches [i.e. infer_batch_process()]
-
 
 def infer_process(
     ref_audio,
@@ -327,7 +310,7 @@ def infer_process(
     gen_text,
     model_obj,
     vocoder,
-    mel_spec_type=mel_spec_type,
+    batch_process_type="brand_new", # "classic"
     show_info=print,
     progress=tqdm,
     target_rms=target_rms,
@@ -343,19 +326,18 @@ def infer_process(
     audio, sr = torchaudio.load(ref_audio)
     max_chars = int(len(ref_text.encode("utf-8")) / (audio.shape[-1] / sr) * (22 - audio.shape[-1] / sr) * speed)
     gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
-    for i, gen_text in enumerate(gen_text_batches):
-        print(f"gen_text {i}", gen_text)
-    print("\n")
 
     show_info(f"Generating audio in {len(gen_text_batches)} batches...")
+
+    batch_process = infer_batch_process if batch_process_type == "classic" else brand_new_infer_batch_process
+
     return next(
-        infer_batch_process(
+        batch_process(
             (audio, sr),
             ref_text,
             gen_text_batches,
             model_obj,
             vocoder,
-            mel_spec_type=mel_spec_type,
             progress=progress,
             target_rms=target_rms,
             cross_fade_duration=cross_fade_duration,
@@ -370,15 +352,12 @@ def infer_process(
 
 
 # infer batches
-
-
 def infer_batch_process(
     ref_audio,
     ref_text,
     gen_text_batches,
     model_obj,
     vocoder,
-    mel_spec_type="vocos",
     progress=tqdm,
     target_rms=0.1,
     cross_fade_duration=0.15,
@@ -391,16 +370,20 @@ def infer_batch_process(
     streaming=False,
     chunk_size=2048,
 ):
+    
     audio, sr = ref_audio
+
     if audio.shape[0] > 1:
         audio = torch.mean(audio, dim=0, keepdim=True)
 
     rms = torch.sqrt(torch.mean(torch.square(audio)))
+
     if rms < target_rms:
         audio = audio * target_rms / rms
     if sr != target_sample_rate:
         resampler = torchaudio.transforms.Resample(sr, target_sample_rate)
         audio = resampler(audio)
+
     audio = audio.to(device)
 
     generated_waves = []
@@ -416,11 +399,12 @@ def infer_batch_process(
 
         # Prepare the text
         text_list = [ref_text + gen_text]
-        final_text_list = convert_char_to_pinyin(text_list)
 
         ref_audio_len = audio.shape[-1] // hop_length
+
         if fix_duration is not None:
             duration = int(fix_duration * target_sample_rate / hop_length)
+
         else:
             # Calculate duration
             ref_text_len = len(ref_text.encode("utf-8"))
@@ -431,21 +415,24 @@ def infer_batch_process(
         with torch.inference_mode():
             generated, _ = model_obj.sample(
                 cond=audio,
-                text=final_text_list,
+                text=text_list,
                 duration=duration,
                 steps=nfe_step,
                 cfg_strength=cfg_strength,
                 sway_sampling_coef=sway_sampling_coef,
             )
+
             del _
 
             generated = generated.to(torch.float32)  # generated mel spectrogram
             generated = generated[:, ref_audio_len:, :]
             generated = generated.permute(0, 2, 1)
-            if mel_spec_type == "vocos":
-                generated_wave = vocoder.decode(generated)
-            elif mel_spec_type == "bigvgan":
-                generated_wave = vocoder(generated)
+            
+            generated_wave = vocoder.decode(generated)
+
+            if streaming:
+                del generated
+
             if rms < target_rms:
                 generated_wave = generated_wave * rms / target_rms
 
@@ -455,6 +442,7 @@ def infer_batch_process(
             if streaming:
                 for j in range(0, len(generated_wave), chunk_size):
                     yield generated_wave[j : j + chunk_size], target_sample_rate
+
             else:
                 generated_cpu = generated[0].cpu().numpy()
                 del generated
@@ -464,6 +452,7 @@ def infer_batch_process(
         for gen_text in progress.tqdm(gen_text_batches) if progress is not None else gen_text_batches:
             for chunk in process_batch(gen_text):
                 yield chunk
+
     else:
         with ThreadPoolExecutor() as executor:
             futures = [executor.submit(process_batch, gen_text) for gen_text in gen_text_batches]
@@ -478,6 +467,7 @@ def infer_batch_process(
             if cross_fade_duration <= 0:
                 # Simply concatenate
                 final_wave = np.concatenate(generated_waves)
+
             else:
                 # Combine all generated waves with cross-fading
                 final_wave = generated_waves[0]
@@ -519,6 +509,247 @@ def infer_batch_process(
 
         else:
             yield None, target_sample_rate, None
+
+
+def brand_new_infer_batch_process(
+    ref_audio,
+    ref_text,
+    gen_text_batches,
+    model_obj,
+    vocoder,
+    progress=tqdm,
+    target_rms=0.1,
+    cross_fade_duration=0.15,
+    nfe_step=32,
+    cfg_strength=2.0,
+    sway_sampling_coef=-1,
+    speed=1,
+    fix_duration=None,
+    device=None,
+    streaming=False,
+    chunk_size=2048,
+):
+    """
+    Микро-батчевый инференс для F5-TTS:
+      - батчим тексты схожей длины (уменьшаем паддинг);
+      - один вызов sample на микро-батч;
+      - вырезаем continuation (после промпта) и декодим вокодером;
+      - оффлайн: склейка с кросс-фейдом; стриминг: почанковая отдача после каждого микро-батча.
+
+    Требуются глобали: target_sample_rate, hop_length.
+    """
+
+    # ---------- настройки микро-батча (подправь под свою VRAM) ----------
+    MAX_BS = 4                 # максимум элементов в одном микро-батче
+    BUCKET_STEP_FRAMES = 256   # шаг корзины по мел-кадрам (чем меньше — тем равнее длины в батче)
+
+    # ---------- helpers ----------
+    def _tqdm(it):
+        if progress is None:
+            return it
+        
+        return progress.tqdm(it) if hasattr(progress, "tqdm") else it
+
+    # Если последний символ ASCII-однобайтный — добавим пробел (стабильность стыка ref+gen)
+    if len(ref_text[-1].encode("utf-8")) == 1:
+        ref_text = ref_text + " "
+
+    # ---------- 0) препроцессинг референса ----------
+    audio, sr = ref_audio  # audio: torch.Tensor [C, T] или [1, T]
+    if audio.dim() == 2 and audio.shape[0] > 1:
+        audio = torch.mean(audio, dim=0, keepdim=True)  # -> [1, T]
+
+    elif audio.dim() == 1:
+        audio = audio.unsqueeze(0)  # -> [1, T]
+
+    # RMS нормализация (только подкачиваем тихие референсы)
+    rms = torch.sqrt(torch.mean(torch.square(audio)))
+    boosted = False
+
+    if rms < target_rms and rms > 0:
+        audio = audio * (target_rms / rms)
+        boosted = True
+
+    # ресемплинг к таргет SR
+    if sr != target_sample_rate:
+        resampler = torchaudio.transforms.Resample(sr, target_sample_rate)
+        audio = resampler(audio)
+
+    audio = audio.to(device)
+    ref_frames = audio.shape[-1] // hop_length  # длина промпта в мел-кадрах
+
+    # попробуем один раз посчитать мел, чтобы не гонять self.mel_spec внутри sample по B раз
+    # только если у модели есть публичный mel_spec (иначе передадим сырое wav и пусть сделает сама)
+    precomputed_mel = None
+    if hasattr(model_obj, "mel_spec"):
+        try:
+            mel = model_obj.mel_spec(audio)          # [1, d, n]
+            precomputed_mel = mel.permute(0, 2, 1)   # -> [1, n, d]
+            precomputed_mel = precomputed_mel.to(next(model_obj.parameters()).dtype)
+
+        except Exception:
+            precomputed_mel = None  # не страшно, перейдём на аудио-ветку внутри sample
+
+    # ---------- 1) оценим длительности по каждой реплике ----------
+    def estimate_frames(gen_text: str) -> int:
+        # локальная «подтормозка» для очень коротких реплик (чтобы не получалось «лепета»)
+        local_speed = 0.3 if len(gen_text.encode("utf-8")) < 10 else speed
+
+        if fix_duration is not None:
+            dur = int(fix_duration * target_sample_rate / hop_length)
+
+        else:
+            rtl = max(len(ref_text.encode("utf-8")), 1)
+            gtl = len(gen_text.encode("utf-8"))
+            dur = ref_frames + int(ref_frames / rtl * gtl / max(local_speed, 1e-3))
+
+        # минимально нужно хотя бы покрыть промпт + 1 кадр
+        return max(dur, ref_frames + 1)
+
+    items = []  # (idx, gen_text, est_dur_frames)
+    for i, t in enumerate(gen_text_batches):
+        items.append((i, t, estimate_frames(t)))
+
+    if not items:
+        # пустой случай — как и раньше, вернём "ничего"
+        yield None, target_sample_rate, None
+        return
+
+    # ---------- 2) бакетизация по длине ----------
+    buckets = defaultdict(list)
+    for idx, t, est in items:
+        key = int(round(est / BUCKET_STEP_FRAMES))
+        buckets[key].append((idx, t, est))
+
+    # упорядочим обход корзин по минимальному исходному индексу внутри корзины
+    bucket_order = sorted(buckets.keys(), key=lambda k: min(i for i, _, _ in buckets[k]))
+
+    # подготовим накопители результата для оффлайн и план для стриминга
+    total = len(items)
+    waves_by_index = [None] * total
+    mels_by_index = [None] * total
+
+    # Для стриминга: будем по возможности отдавать в исходном порядке
+    next_to_yield = 0
+
+    # ---------- 3) прогон по корзинам с микро-батчами ----------
+    for bkey in bucket_order:
+        bucket = buckets[bkey]
+        # нарежем на куски по MAX_BS
+        chunks = [bucket[i : i + MAX_BS] for i in range(0, len(bucket), MAX_BS)]
+
+        for chunk in _tqdm(chunks):
+            # --- 3.1 подготовка батча ---
+            idxs, texts, ests = zip(*chunk)
+            B = len(chunk)
+
+            # финальные целевые длительности именно для sample (она всё равно проверит min_need/lens)
+            durations = []
+            speeds_local = []
+
+            for t in texts:
+                speeds_local.append(0.3 if len(t.encode("utf-8")) < 10 else speed)
+                durations.append(estimate_frames(t))
+
+            duration_tensor = torch.tensor(durations, device=device, dtype=torch.long)
+            lens_tensor = torch.full((B,), ref_frames, device=device, dtype=torch.long)
+            text_list = [ref_text + t for t in texts]
+
+            # cond: либо один раз посчитанный мел расширяем по B, либо дублируем аудио
+            if precomputed_mel is not None:
+                cond_batch = precomputed_mel.expand(B, -1, -1)  # [B, n, d]
+
+            else:
+                cond_batch = audio.expand(B, -1)                 # [B, T] сырое аудио (ветка в sample сама сделает мел)
+
+            # --- 3.2 вызов модели (mel без вокодера) ---
+            with torch.no_grad():
+                out, _traj = model_obj.sample(
+                    cond=cond_batch,
+                    text=text_list,
+                    duration=duration_tensor,
+                    lens=lens_tensor,
+                    steps=nfe_step,
+                    cfg_strength=cfg_strength,
+                    sway_sampling_coef=sway_sampling_coef,
+                    vocoder=None,           # получим мел; декодим отдельно
+                )
+                # out: [B, n_max, d] с пришитым слева промптом точно как во входе
+                del _traj
+
+            # --- 3.3 вырезаем continuation для каждого элемента и декодим ---
+            for k in range(B):
+                dur_k = int(duration_tensor[k].item())
+                # мел-кусок только после промпта: [n_mels, T_cont]
+                mel_k = out[k, lens_tensor[k] : dur_k, :].permute(1, 0).contiguous()  # -> [d, T]
+
+                p = next(vocoder.parameters())
+                mel_k = mel_k.to(device=p.device, dtype=p.dtype)
+
+                # декодер ожидает [B, n_mels, T]
+                wav_k = vocoder.decode(mel_k.unsqueeze(0))  # -> [1, n_samples] (torch)
+
+                # вернуть громкость к RMS исходника, если мы подкачивали
+                if boosted and target_rms > 0:
+                    wav_k = wav_k * (rms / target_rms)
+
+                wav_np = wav_k.squeeze(0).detach().cpu().numpy()
+                mel_np = mel_k.detach().cpu().numpy()  # [n_mels, T_cont]
+
+                waves_by_index[idxs[k]] = wav_np
+                mels_by_index[idxs[k]] = mel_np
+
+            # --- 3.4 стриминг: после микро-батча отдаём готовые по порядку индексов ---
+            if streaming:
+                while next_to_yield < total and waves_by_index[next_to_yield] is not None:
+                    w = waves_by_index[next_to_yield]
+
+                    # отдаём чанками
+                    for j in range(0, len(w), chunk_size):
+                        yield w[j : j + chunk_size], target_sample_rate
+
+                    next_to_yield += 1
+
+    # ---------- 4) оффлайн-склейка / комбинированный мел ----------
+    if not streaming:
+        generated_waves = [w for w in waves_by_index if w is not None]
+        spectrograms = [m for m in mels_by_index if m is not None]
+
+        if not generated_waves:
+            yield None, target_sample_rate, None
+            return
+
+        if cross_fade_duration <= 0:
+            final_wave = np.concatenate(generated_waves)
+        else:
+            final_wave = generated_waves[0]
+            for i in range(1, len(generated_waves)):
+                prev_wave = final_wave
+                next_wave = generated_waves[i]
+
+                cross_fade_samples = int(cross_fade_duration * target_sample_rate)
+                cross_fade_samples = min(cross_fade_samples, len(prev_wave), len(next_wave))
+                if cross_fade_samples <= 0:
+                    final_wave = np.concatenate([prev_wave, next_wave])
+                    continue
+
+                prev_overlap = prev_wave[-cross_fade_samples:]
+                next_overlap = next_wave[:cross_fade_samples]
+
+                # линейный кросс-фейд (можно заменить на equal-power при желании)
+                fade_out = np.linspace(1.0, 0.0, cross_fade_samples, dtype=prev_wave.dtype)
+                fade_in  = np.linspace(0.0, 1.0, cross_fade_samples, dtype=next_wave.dtype)
+
+                cross_faded_overlap = prev_overlap * fade_out + next_overlap * fade_in
+
+                final_wave = np.concatenate(
+                    [prev_wave[:-cross_fade_samples], cross_faded_overlap, next_wave[cross_fade_samples:]]
+                )
+
+        combined_spectrogram = np.concatenate(spectrograms, axis=1)  # по времени
+
+        yield final_wave, target_sample_rate, combined_spectrogram
+
 
 
 # remove silence from generated wav

@@ -4,7 +4,7 @@ from pathlib import Path
 from importlib.resources import files
 
 import tqdm
-import yaml
+import torch
 import soundfile as sf
 
 from utils_infer import (
@@ -16,41 +16,37 @@ from utils_infer import (
     save_spectrogram,
 )
 
-from utils import seed_everything
+from core.utils import seed_everything
+from settings.structure import load_settings
 
+from injection_policy import wrap_with_deepspeed_inference, ds_add_aliases
 
 class F5TTS:
     def __init__(
         self,
         config_path: Path,
-        #ckpt_file: Path,
         vocab_file: Path,
+        ckpt_file: Path,
+        vocoder_local_path: Path,
+        *,
         ode_method="euler",
         use_ema=True,
-        vocoder_local_path=None,
         device=None,
-        hf_cache_dir=None,
+        use_deepspeed=True
     ) -> None:
         
-        with open(str(config_path), "r") as f:
-            model_cfg = yaml.safe_load(f)
-        model_cfg = OmegaConf.load(str(files("f5_tts").joinpath(f"configs/{model}.yaml")))
-        model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
+        model_cfg = load_settings(config_path)
 
-        model_arc = model_cfg.model.arch
+        model_arc = model_cfg.arch
+        self.target_sample_rate = model_cfg.mel_spec.target_sample_rate
 
-        self.mel_spec_type = model_cfg.model.mel_spec.mel_spec_type
-        self.target_sample_rate = model_cfg.model.mel_spec.target_sample_rate
-
-        self.ode_method = ode_method
         self.use_ema = use_ema
+        self.ode_method = ode_method
 
         if device is not None:
             self.device = device
 
         else:
-            import torch
-
             self.device = (
                 "cuda"
                 if torch.cuda.is_available()
@@ -63,15 +59,37 @@ class F5TTS:
 
         # Load models
         self.vocoder = load_vocoder(
-            vocoder_local_path, self.device, hf_cache_dir
+            vocoder_local_path, 
+            self.device, 
         )
 
-        
         self.ema_model = load_model(
-            model_cls, model_arc, ckpt_file, self.mel_spec_type, vocab_file, self.ode_method, self.use_ema, self.device
+            model_arc.model_dump(), 
+            ckpt_file, 
+            vocab_file, 
+            self.ode_method, 
+            model_cfg.mel_spec.n_fft,
+            model_cfg.mel_spec.hop_length,
+            model_cfg.mel_spec.win_length,
+            model_cfg.mel_spec.n_mel_channels,
+            model_cfg.mel_spec.target_sample_rate,
+            use_ema=self.use_ema, 
+            device=self.device
         )
 
+        if use_deepspeed:
+            self.ema_model.transformer = ds_add_aliases(self.ema_model.transformer)
 
+            ds_engine, ds_module = wrap_with_deepspeed_inference(
+                self.ema_model.transformer.half(),        # или .to(torch.bfloat16) при поддержке
+                prefer_kernel_inject=True, # сначала пробуем KI
+                dtype=torch.float16,       # можно bfloat16 на Ada/Ampere+
+                use_triton=True,           # верные ключи в 0.18.x
+                triton_autotune=False
+            )
+
+            self.ds_engine = ds_engine
+            self.ema_model.transformer = ds_module.eval().to(self.device)
 
     def export_wav(self, wav, file_wave, remove_silence=False):
         sf.write(file_wave, wav, self.target_sample_rate)
@@ -103,18 +121,18 @@ class F5TTS:
     ):
         if seed is None:
             seed = random.randint(0, sys.maxsize)
+
         seed_everything(seed)
         self.seed = seed
 
         ref_file, ref_text = preprocess_ref_audio_text(ref_file, ref_text)
 
-        wav, sr, spec = infer_process(
+        wav, sr, spec = infer_process( # type: ignore
             ref_file,
             ref_text,
             gen_text,
             self.ema_model,
             self.vocoder,
-            self.mel_spec_type,
             show_info=show_info,
             progress=progress,
             target_rms=target_rms,
@@ -137,14 +155,20 @@ class F5TTS:
 
 
 if __name__ == "__main__":
-    f5tts = F5TTS()
+    f5tts = F5TTS(
+        config_path=Path("/home/user5/f5/model.yaml"),
+        vocab_file=Path("/home/user5/f5_model/vocab.txt"),
+        ckpt_file=Path("/home/user5/f5_model/espeech_tts_rlv2.pt"),
+        vocoder_local_path=Path("/home/user5/f5_model"),
+        device="cuda:5"
+    )
 
     wav, sr, spec = f5tts.infer(
-        ref_file=str(files("f5_tts").joinpath("infer/examples/basic/basic_ref_en.wav")),
-        ref_text="some call me nature, others call me mother nature.",
-        gen_text="""I don't really care what you call me. I've been a silent spectator, watching species evolve, empires rise and fall. But always remember, I am mighty and enduring. Respect me and I'll nurture you; ignore me and you shall face the consequences.""",
-        file_wave=str(files("f5_tts").joinpath("../../tests/api_out.wav")),
-        file_spec=str(files("f5_tts").joinpath("../../tests/api_out.png")),
+        ref_file="/home/user5/ref.wav",
+        ref_text="то есть вы представьте себе планка два и семь, где-то какие-то сучки, на маленьком кусочке это просто будет не видно. ну вы же сами понимаете это.",
+        gen_text="""Без сучка и задоринки, говорили они - кто бы мог подумать!""",
+        nfe_step=16,
+        file_wave="/home/user5/out1.wav",
         seed=None,
     )
 

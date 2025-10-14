@@ -1,25 +1,22 @@
-model:
-  name: F5TTS_v1_Base  # model name
-  tokenizer_path: null  
-  backbone: DiT
+tokenizer_path: null
 
-  arch:
-    dim: 1024
-    depth: 22
-    heads: 16
-    ff_mult: 2
-    text_dim: 512
-    text_mask_padding: True
-    qk_norm: null                  # null | rms_norm
-    conv_layers: 4
-    pe_attn_head: null
-    attn_backend: torch            # torch | flash_attn
-    attn_mask_enabled: False
-    checkpoint_activations: False  # recompute activations and save memory for extra compute
-
-  mel_spec:
-    target_sample_rate: 24000
-    n_mel_channels: 100
-    hop_length: 256
-    win_length: 1024
-    n_fft: 1024
+arch:
+  dim: 1024
+  depth: 22
+  heads: 16
+  ff_mult: 2
+  text_dim: 512
+  text_mask_padding: true
+  qk_norm: null
+  conv_layers: 4
+  pe_attn_head: null
+  attn_backend: torch
+  attn_mask_enabled: false
+  checkpoint_activations: false
+  
+mel_spec:
+  target_sample_rate: 24000
+  n_mel_channels: 100
+  hop_length: 256
+  win_length: 1024
+  n_fft: 1024

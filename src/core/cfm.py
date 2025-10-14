@@ -32,8 +32,8 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 
 # В проекте это внутренние модули:
-from modules import MelSpec
-from utils import (
+from core.modules import MelSpec
+from core.utils import (
     default,             # default(x, y) -> x if exists(x) else y
     exists,              # exists(x)     -> x is not None
     get_epss_timesteps,  # эмпирически подобранная сетка времени для малого NFE
@@ -99,7 +99,7 @@ class CFM(nn.Module):
 
         # --- бэкбон (DiT) ---
         self.transformer = transformer
-        self.dim = getattr(transformer, "dim", None)  # скрытая размерность модели (для справки)
+        self.dim = getattr(self.transformer, "dim", None)  # скрытая размерность модели (для справки)
 
         # --- параметры интегратора ОДУ ---
         self.odeint_kwargs = odeint_kwargs

@@ -24,9 +24,10 @@ class MelSettings(BaseModel):
     n_fft: int
 
 class ModelSettings(BaseModel):
-  tokenizer_path: str  
+  tokenizer_path: str | None  
   arch: ArchSettings
   mel_spec: MelSettings
+
 
 def load_settings(settings_path: Path) -> ModelSettings:
     """Load configuration from YAML files using Dynaconf.
@@ -40,18 +41,15 @@ def load_settings(settings_path: Path) -> ModelSettings:
     """
     # Check if settings file exists
     if not settings_path.exists():
-        raise FileNotFoundError(f"Settings file not found: {from}")
+        raise FileNotFoundError(f"Settings file not found: {settings_path}")
 
     # Load configuration using Dynaconf
     dynaconf_settings = Dynaconf(
-        settings_files=config_files,
-        envvar_prefix="NAL_",
-        load_dotenv=True,
-        merge_enabled=True,
+        settings_files=[settings_path],
     )
 
     # Convert Dynaconf settings to a regular dictionary
-    config_data = {k.lower(): v for k, v in dynaconf_settings.to_dict().items()}
+    config_data = {k.lower(): v for k, v in dynaconf_settings.to_dict(internal=False).items()}
 
     # Create Settings instance directly from config data
     return ModelSettings.model_validate(config_data)

@@ -19,8 +19,6 @@ from .utils_infer import (
 from .core.utils import seed_everything
 from .settings.structure import load_settings
 
-from .injection_policy import wrap_with_deepspeed_inference, ds_add_aliases
-
 class F5TTS:
     def __init__(
         self,
@@ -31,8 +29,7 @@ class F5TTS:
         *,
         ode_method="euler",
         use_ema=True,
-        device=None,
-        use_deepspeed=True
+        device=None
     ) -> None:
         
         model_cfg = load_settings(config_path)
@@ -76,20 +73,6 @@ class F5TTS:
             use_ema=self.use_ema, 
             device=self.device
         )
-
-        if use_deepspeed:
-            self.ema_model.transformer = ds_add_aliases(self.ema_model.transformer)
-
-            ds_engine, ds_module = wrap_with_deepspeed_inference(
-                self.ema_model.transformer.half(),        # или .to(torch.bfloat16) при поддержке
-                prefer_kernel_inject=True, # сначала пробуем KI
-                dtype=torch.float16,       # можно bfloat16 на Ada/Ampere+
-                use_triton=True,           # верные ключи в 0.18.x
-                triton_autotune=False
-            )
-
-            self.ds_engine = ds_engine
-            self.ema_model.transformer = ds_module.eval().to(self.device)
 
     def export_wav(self, wav, file_wave, remove_silence=False):
         sf.write(file_wave, wav, self.target_sample_rate)

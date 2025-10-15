@@ -59,7 +59,7 @@ from .phi.model import PhiForCausalLM, PhiModel
 from .phi3.model import Phi3ForCausalLM, Phi3Model
 from .qwen.model import QWenForCausalLM
 from .recurrentgemma.model import RecurrentGemmaForCausalLM
-from .redrafter.model import ReDrafterForCausalLM
+from .redrafter.model import ReDrafterForLLaMALM
 
 
 __all__ = [
@@ -87,7 +87,7 @@ __all__ = [
     "LLaMAModel",
     "MedusaConfig",
     "MedusaForCausalLm",
-    "ReDrafterForCausalLM",
+    "ReDrafterForLLaMALM",
     "GPTJConfig",
     "GPTJModel",
     "GPTJForCausalLM",
@@ -164,7 +164,7 @@ MODEL_MAP = {
     "InternLMForCausalLM": LLaMAForCausalLM,
     "InternLM2ForCausalLM": LLaMAForCausalLM,
     "MedusaForCausalLM": MedusaForCausalLm,
-    "ReDrafterForCausalLM": ReDrafterForCausalLM,
+    "ReDrafterForLLaMALM": ReDrafterForLLaMALM,
     "BaichuanForCausalLM": BaichuanForCausalLM,
     "BaiChuanForCausalLM": BaichuanForCausalLM,
     "SkyworkForCausalLM": LLaMAForCausalLM,

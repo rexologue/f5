@@ -14,20 +14,22 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import torch
-import torch.nn as nn
+import torchaudio
 import torch.nn.functional as F
 import tensorrt as trt
 from tensorrt_llm.runtime.session import Session, TensorInfo
 from tensorrt_llm._utils import str_dtype_to_torch, trt_dtype_to_torch
 
-from ..src.utils_infer import (
+from src.utils_infer import (
     preprocess_ref_audio_text,
     remove_silence_for_generated_wav,
     save_spectrogram,
-    load_vocoder as load_vocoder_fallback,  # fallback if no TRT vocoder
+    load_vocoder,
 )
 
-from ..src.core.dit import TextEmbedding
+from src.core.dit import TextEmbedding
+from src.core.utils import get_tokenizer, list_str_to_idx
+from src.settings.structure import load_settings
 
 # ----------------- small local helpers (strictly what's needed) -----------------
 
@@ -304,13 +306,22 @@ class F5TTS_TRT:
         ckpt_file: Path,                    # PyTorch ckpt (only for text-embedding weights)
         tllm_engine_dir: Path,              # dir with TensorRT-LLM engine (config.json + rank0.engine)
         vocoder_trt_plan: Optional[Path] = None,  # plan file for Vocos (optional; fallback to PyTorch Vocos)
+        vocoder_local_path: Optional[Path] = None,  # path with config + weights for PyTorch vocoder fallback
         device: Optional[str] = None,
     ):
         self.device = torch.device(device) if device is not None else torch.device("cuda")
 
+        # load model configuration for mel/vocoder params
+        model_cfg = load_settings(config_path)
+        mel_cfg = model_cfg.mel_spec
+        self.target_sample_rate = mel_cfg.target_sample_rate
+        self.n_mel_channels = mel_cfg.n_mel_channels
+        self.hop_length = mel_cfg.hop_length
+        self.win_length = mel_cfg.win_length
+        self.n_fft = mel_cfg.n_fft
+
         # vocab size from your text vocab
-        with open(vocab_file, "r", encoding="utf-8") as f:
-            vocab_size = sum(1 for _ in f)
+        self.vocab_char_map, vocab_size = get_tokenizer(vocab_file)
 
         # TRT core
         self.core = _F5TRTCore(
@@ -318,6 +329,8 @@ class F5TTS_TRT:
             text_vocab_size=vocab_size,
             model_ckpt_for_text_embed=ckpt_file,
             device=self.device,
+            n_mel_channels=self.n_mel_channels,
+            target_sample_rate=self.target_sample_rate,
         )
 
         # vocoder
@@ -326,13 +339,73 @@ class F5TTS_TRT:
             self._vocoder_is_trt = True
 
         else:
+            if vocoder_local_path is None:
+                raise ValueError(
+                    "vocoder_local_path must be provided when TensorRT vocoder plan is not supplied."
+                )
+
             # fallback to your existing loader (HF / local torch model)
-            self.vocoder = load_vocoder_fallback(vocoder_local_path=None, device=str(self.device))
+            self.vocoder = load_vocoder(Path(vocoder_local_path), str(self.device))
             self._vocoder_is_trt = False
 
-        self.target_sample_rate = 24000  # consistent with training/config
+        self.mel_transform = torchaudio.transforms.MelSpectrogram(
+            sample_rate=self.target_sample_rate,
+            n_fft=self.n_fft,
+            win_length=self.win_length,
+            hop_length=self.hop_length,
+            n_mels=self.n_mel_channels,
+            center=True,
+            pad_mode="reflect",
+            power=2.0,
+            norm="slaney",
+            mel_scale="slaney",
+        )
 
     # ---- helpers copying your original public API ----
+
+    def _build_ref_mel(self, audio_path: Union[str, Path]) -> Tuple[torch.Tensor, int]:
+        wav, sr = torchaudio.load(str(audio_path))
+
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+
+        if sr != self.target_sample_rate:
+            resampler = torchaudio.transforms.Resample(sr, self.target_sample_rate)
+            wav = resampler(wav)
+
+        mel = self.mel_transform(wav)
+        mel = torch.log(torch.clamp(mel, min=1e-5))
+        mel = mel.transpose(1, 2).contiguous()  # -> [1, T, n_mels]
+
+        return mel, mel.shape[1]
+
+    def _prepare_text_indices(self, text: str, seq_len: int) -> torch.Tensor:
+        text_tensor = list_str_to_idx([text], self.vocab_char_map)
+        text_tensor = text_tensor[:, :seq_len]
+
+        if text_tensor.shape[-1] < seq_len:
+            pad = seq_len - text_tensor.shape[-1]
+            text_tensor = F.pad(text_tensor, (0, pad), value=-1)
+
+        return text_tensor.to(self.device)
+
+    def _estimate_target_duration(
+        self,
+        ref_len: int,
+        ref_text: str,
+        gen_text: str,
+        speed: float,
+        fix_duration: Optional[float],
+    ) -> int:
+        if fix_duration is not None:
+            return int(fix_duration * self.target_sample_rate / self.hop_length)
+
+        ref_text_len = max(len(ref_text.encode("utf-8")), 1)
+        gen_text_len = len(gen_text.encode("utf-8"))
+        speed = max(speed, 1e-6)
+
+        estimated = ref_len + int(ref_len / ref_text_len * gen_text_len / speed)
+        return max(ref_len + 1, estimated)
 
     def export_wav(self, wav: torch.Tensor, file_wave: Union[str, Path], remove_silence=False):
         import soundfile as sf
@@ -377,21 +450,16 @@ class F5TTS_TRT:
         # 1) preprocess (reuses your utils)
         ref_file, ref_text = preprocess_ref_audio_text(ref_file, ref_text)
 
-        # 2) build reference mel and text indices using your utils functions
-        #    We use your src/utils_infer functions for text->indices to keep parity.
-        from .utils_infer import (
-            text_to_vocab_idx_list,
-            build_mel_from_audio,  # should produce [1, T, 100] float32 log-mel
-        )
+        # 2) build reference mel and text indices using the repo utilities
+        ref_mel, ref_len = self._build_ref_mel(ref_file)
 
-        # build ref mel
-        ref_mel: torch.Tensor = build_mel_from_audio(ref_file, device=str(self.device))  # (1, T, 100)
-        ref_len = ref_mel.shape[1]
+        processed_ref_text = ref_text
+        if processed_ref_text and len(processed_ref_text[-1].encode("utf-8")) == 1:
+            processed_ref_text += " "
 
-        # concat prompt+target text per your pipeline
-        full_text = ref_text + gen_text
-        text_idx, target_len = text_to_vocab_idx_list(full_text, ref_len, device=str(self.device))
-        # text_idx: (1, T) with -1 padding; target_len: int (estimated T_out)
+        full_text = processed_ref_text + gen_text
+        target_len = self._estimate_target_duration(ref_len, processed_ref_text, gen_text, speed, fix_duration)
+        text_idx = self._prepare_text_indices(full_text, target_len)
 
         # 3) run DiT (TRT-LLM)
         gen_list, _ = self.core.sample(

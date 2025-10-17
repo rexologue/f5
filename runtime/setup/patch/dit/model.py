@@ -37,7 +37,8 @@ class DiT(PretrainedModel):
             return profile(val, val, val)
 
         max_batch_size = kwargs.get("max_batch_size", 2)
-        batch_profile = profile(2, 2, max_batch_size)
+        opt_b = 2 if max_batch_size >= 2 else 1 
+        batch_profile = profile(1, opt_b, max_batch_size)
         max_seq_len = kwargs.get("max_seq_len", 4096)
         head_dim = self.dim_head
         hidden = self.dim
@@ -53,7 +54,7 @@ class DiT(PretrainedModel):
             rope_sin = Tensor("rope_sin", dtype=self.config.dtype, shape=[-1, head_dim],
                               dim_range=OrderedDict([("num_frames", num_frames_profile), ("head_dim", static_profile(head_dim))]))
         else:
-            time_profile = profile(100, max_seq_len // 2, max_seq_len)
+            time_profile = profile(64, max_seq_len // 2, max_seq_len)
             x = Tensor("x", dtype=self.config.dtype, shape=[-1, -1, hidden],
                        dim_range=OrderedDict([("batch", batch_profile), ("time", time_profile), ("hidden", static_profile(hidden))]))
             t = Tensor("t", dtype=self.config.dtype, shape=[-1, hidden],

@@ -189,7 +189,7 @@ class VocoderTRT(nn.Module):
             )
     
     @torch.inference_mode()
-    def __call__(self, mel: torch.Tensor) -> torch.Tensor:
+    def decode(self, mel: torch.Tensor) -> torch.Tensor:
         """
         mel: [B, n_mels, T] → audio: [B, n_samples]
         """

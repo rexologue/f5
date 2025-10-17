@@ -215,7 +215,7 @@ class F5DiTTRT(nn.Module):
         hidden: int = 1024,
         num_heads: int = 16,
         dim_head: int = 64,
-        text_num_embeds: int = 256,
+        text_num_embeds: int | None = None,
         text_dim: int | None = None,
         text_mask_padding: bool = True,
         text_embedding_average_upsampling: bool = False,
@@ -238,8 +238,9 @@ class F5DiTTRT(nn.Module):
         # === PyTorch компоненты ===
         self.time_embed = TimestepEmbedding(hidden)
         
+        num_embeds = tokenizer_vocab_size if tokenizer_vocab_size is not None else (text_num_embeds or 256)
         self.text_embed = TextEmbedding(
-            text_num_embeds=text_num_embeds,
+            text_num_embeds=num_embeds,
             text_dim=self.text_dim,
             mask_padding=text_mask_padding,
             average_upsampling=text_embedding_average_upsampling,
@@ -252,6 +253,9 @@ class F5DiTTRT(nn.Module):
             text_dim=self.text_dim,
             out_dim=hidden,
         )
+
+        assert self.text_embed.text_embed.num_embeddings == (tokenizer_vocab_size + 1), \
+            f"Embedding size {self.text_embed.text_embed.num_embeddings} != vocab_size+1 {tokenizer_vocab_size+1}"
         
         self.norm_out = AdaLayerNorm_Final(hidden)
         self.proj_out = nn.Linear(hidden, mel_dim)

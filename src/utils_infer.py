@@ -683,8 +683,15 @@ def brand_new_infer_batch_process(
                 # мел-кусок только после промпта: [n_mels, T_cont]
                 mel_k = out[k, lens_tensor[k] : dur_k, :].permute(1, 0).contiguous()  # -> [d, T]
 
-                p = next(vocoder.parameters())
-                mel_k = mel_k.to(device=p.device, dtype=p.dtype)
+                dev = getattr(vocoder, "device", mel_k.device)
+                dt  = getattr(vocoder, "dtype",  mel_k.dtype)
+                try:
+                    p = next(vocoder.parameters())
+                    dev = getattr(p, "device", dev)
+                    dt  = getattr(p, "dtype",  dt)
+                except Exception:
+                    pass
+                mel_k = mel_k.to(device=dev, dtype=dt)
 
                 # декодер ожидает [B, n_mels, T]
                 wav_k = vocoder.decode(mel_k.unsqueeze(0))  # -> [1, n_samples] (torch)

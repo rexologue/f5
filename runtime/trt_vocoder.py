@@ -86,8 +86,20 @@ class _TensorRTPlanRunner:
 
             self.input_name = input_names[0]
             self.output_name = output_names[0]
-            self.input_index = self.engine.get_tensor_index(self.input_name)
-            self.output_index = self.engine.get_tensor_index(self.output_name)
+
+            try:
+                self.input_index = tensor_names.index(self.input_name)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "Failed to locate TensorRT input tensor in engine bindings"
+                ) from exc
+
+            try:
+                self.output_index = tensor_names.index(self.output_name)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "Failed to locate TensorRT output tensor in engine bindings"
+                ) from exc
 
             input_dtype = self.engine.get_tensor_dtype(self.input_name)
             output_dtype = self.engine.get_tensor_dtype(self.output_name)

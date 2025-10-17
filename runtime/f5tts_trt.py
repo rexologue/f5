@@ -84,8 +84,8 @@ class F5TTSTRT:
             odeint_kwargs=dict(method=ode_method),
             num_channels=mel_dim,
             mel_spec_kwargs=dict(
-                sr=model_cfg.mel_spec.target_sample_rate,
-                n_mels=model_cfg.mel_spec.n_mel_channels,
+                target_sample_rate=model_cfg.mel_spec.target_sample_rate,
+                n_mel_channels=model_cfg.mel_spec.n_mel_channels,
                 hop_length=model_cfg.mel_spec.hop_length,
                 n_fft=model_cfg.mel_spec.n_fft,
                 win_length=model_cfg.mel_spec.win_length,

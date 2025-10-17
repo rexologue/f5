@@ -30,8 +30,15 @@ class _DiTRuntime:
       inputs:  'x_embed', 't_embed', 'rope_cos', 'rope_sin', 'input_lengths'
       outputs: 'hidden'
     """
-    def __init__(self, engine_dir: str, device: str = "cuda", dtype: torch.dtype = torch.float16):
-        self.runner = create_model_runner(engine_dir, device=device)
+    def __init__(
+        self,
+        engine_dir: str,
+        *,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.float16,
+        vocab_size: int | None = None,
+    ):
+        self.runner = create_model_runner(engine_dir, device=device, fallback_vocab_size=vocab_size)
         self.device = torch.device(device)
         self.dtype = dtype
 
@@ -91,6 +98,7 @@ class F5DiTTRT(nn.Module):
         # прочее:
         dtype: torch.dtype = torch.float16,
         device: str = "cuda",
+        tokenizer_vocab_size: Optional[int] = None,
     ):
         super().__init__()
         self.mel_dim = mel_dim
@@ -127,7 +135,12 @@ class F5DiTTRT(nn.Module):
         self.to(self.device).to(self.dtype)
 
         # --- TRT DiT ядро ---
-        self.dit = _DiTRuntime(trt_dit_dir, device=device, dtype=dtype)
+        self.dit = _DiTRuntime(
+            trt_dit_dir,
+            device=device,
+            dtype=dtype,
+            vocab_size=tokenizer_vocab_size,
+        )
 
     # ---------------- utils ----------------
 

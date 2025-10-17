@@ -10,7 +10,11 @@ from typing import Union
 from tensorrt_llm.runtime import ModelRunner
 
 
-def _patch_missing_vocab_size(config_path: Path) -> bool:
+def _patch_missing_vocab_size(
+    config_path: Path,
+    *,
+    fallback_vocab_size: int | None = None,
+) -> bool:
     """Ensure ``builder_config.vocab_size`` exists in TensorRT engine configs.
 
     TensorRT-LLM 1.0 tightened validation around the vocabulary size stored in
@@ -48,6 +52,7 @@ def _patch_missing_vocab_size(config_path: Path) -> bool:
         data.get("pretrained_config", {}).get("vocab_size")
         or data.get("tokenizer", {}).get("vocab_size")
         or data.get("tokenizer", {}).get("model", {}).get("vocab_size")
+        or fallback_vocab_size
     )
 
     if fallback is None:
@@ -69,7 +74,12 @@ def _patch_missing_vocab_size(config_path: Path) -> bool:
     return True
 
 
-def create_model_runner(engine_path: Union[str, Path], *, device: Union[str, int] | None = None) -> ModelRunner:
+def create_model_runner(
+    engine_path: Union[str, Path],
+    *,
+    device: Union[str, int] | None = None,
+    fallback_vocab_size: int | None = None,
+) -> ModelRunner:
     """Create a :class:`ModelRunner` instance handling API differences.
 
     TensorRT-LLM changed the :class:`ModelRunner` constructor in v1.0 to
@@ -86,6 +96,9 @@ def create_model_runner(engine_path: Union[str, Path], *, device: Union[str, int
     device:
         Optional device identifier used only by legacy versions that accept a
         ``device`` keyword argument.
+    fallback_vocab_size:
+        Vocabulary size inferred from the tokenizer.  Used only when the TensorRT
+        engine config is missing the ``builder_config.vocab_size`` field.
     """
 
     engine_path = Path(engine_path)
@@ -109,7 +122,7 @@ def create_model_runner(engine_path: Union[str, Path], *, device: Union[str, int
                 raise
 
             config_path = engine_dir / "config.json"
-            if not _patch_missing_vocab_size(config_path):
+            if not _patch_missing_vocab_size(config_path, fallback_vocab_size=fallback_vocab_size):
                 raise
             return ModelRunner.from_dir(str(engine_dir))
 

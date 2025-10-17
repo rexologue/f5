@@ -7,6 +7,7 @@ import time
 import traceback
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, Tuple
 
 from utils import preload_libpython
 preload_libpython()
@@ -77,20 +78,51 @@ def parse_arguments():
     parser.add_argument("--dtype", type=str, default="float16", choices=["float32", "bfloat16", "float16"])
     parser.add_argument("--fp8_linear", action="store_true")
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--vocab-size",
+        type=int,
+        default=None,
+        help="Override tokenizer vocabulary size when checkpoint metadata is unavailable.",
+    )
     return parser.parse_args()
 
 
-def convert_timm_dit(args, mapping, dtype="float16"):
+VOCAB_WEIGHT_CANDIDATES = (
+    "ema_model.transformer.text_embed.text_embed.weight",
+    "ema_model.text_embed.text_embed.weight",
+    "transformer.text_embed.text_embed.weight",
+    "text_embed.text_embed.weight",
+)
+
+
+def _infer_vocab_size(state_dict: Dict[str, torch.Tensor]) -> tuple[int | None, str | None]:
+    for key in VOCAB_WEIGHT_CANDIDATES:
+        if key in state_dict:
+            weight = state_dict[key]
+            if isinstance(weight, torch.Tensor) and weight.ndim >= 1:
+                return int(weight.shape[0]), key
+    return None, None
+
+
+def convert_timm_dit(args, mapping, dtype="float16") -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
     tik = time.time()
     torch_dtype = str_dtype_to_torch(dtype)
     tensor_parallel = mapping.tp_size
 
-    model_params = dict(torch.load(args.timm_ckpt))
-    # берём только поддерево трансформера
-    model_params = {
-        k: v for k, v in model_params["ema_model_state_dict"].items()
-        if k.startswith("ema_model.transformer")
+    ckpt = dict(torch.load(args.timm_ckpt))
+    state_dict = ckpt.get("ema_model_state_dict", ckpt)
+
+    vocab_size = args.vocab_size
+    vocab_source = "cli"
+    if vocab_size is None:
+        vocab_size, vocab_source = _infer_vocab_size(state_dict)
+    metadata: Dict[str, Any] = {
+        "vocab_size": vocab_size,
+        "vocab_source": vocab_source,
     }
+
+    # берём только поддерево трансформера
+    model_params = {k: v for k, v in state_dict.items() if k.startswith("ema_model.transformer")}
     prefix = "ema_model.transformer."
     model_params = {key[len(prefix):] if key.startswith(prefix) else key: value
                     for key, value in model_params.items()}
@@ -103,7 +135,7 @@ def convert_timm_dit(args, mapping, dtype="float16"):
                 return re.sub(pat, repl, src_name)
         return None  # не относящееся к DiT — выкидываем
 
-    weights = {}
+    weights: Dict[str, torch.Tensor] = {}
     for name, param in model_params.items():
         new_name = map_name(name)
         if new_name is None:
@@ -133,11 +165,16 @@ def convert_timm_dit(args, mapping, dtype="float16"):
             weights[k] = v
 
     print(f"Weights loaded (DiT only). Elapsed: {time.strftime('%H:%M:%S', time.gmtime(time.time()-tik))}")
-    return weights
+    return weights, metadata
 
 
-def save_config(args):
+def save_config(args, metadata: Dict[str, Any]):
     os.makedirs(args.output_dir, exist_ok=True)
+    vocab_size = metadata.get("vocab_size")
+    builder_config: Dict[str, Any] = {"precision": args.dtype}
+    if vocab_size is not None:
+        builder_config["vocab_size"] = int(vocab_size)
+
     config = {
         "architecture": "DiT",
         "dtype": args.dtype,
@@ -151,7 +188,13 @@ def save_config(args):
             "tp_size": args.tp_size,
             "pp_size": args.pp_size,
         },
+        "builder_config": builder_config,
     }
+    if vocab_size is not None:
+        config.setdefault("tokenizer", {})["vocab_size"] = int(vocab_size)
+        config.setdefault("pretrained_config", {})["vocab_size"] = int(vocab_size)
+    if metadata.get("vocab_source"):
+        config.setdefault("metadata", {})["vocab_source"] = metadata["vocab_source"]
     if args.fp8_linear:
         config["quantization"] = {"quant_algo": "FP8"}
 
@@ -160,9 +203,6 @@ def save_config(args):
 
 
 def convert_and_save(args, rank):
-    if rank == 0:
-        save_config(args)
-
     mapping = Mapping(
         world_size=args.cp_size * args.tp_size * args.pp_size,
         rank=rank,
@@ -171,7 +211,9 @@ def convert_and_save(args, rank):
         pp_size=args.pp_size,
     )
 
-    weights = convert_timm_dit(args, mapping, dtype=args.dtype)
+    weights, metadata = convert_timm_dit(args, mapping, dtype=args.dtype)
+    if rank == 0:
+        save_config(args, metadata)
     safetensors.torch.save_file(weights, os.path.join(args.output_dir, f"rank{rank}.safetensors"))
 
 

@@ -108,11 +108,58 @@ def _ensure_vocab_size(
     """Ensure at least one configuration file defines ``builder_config.vocab_size``."""
 
     patched = False
-    for config_path in _iter_engine_config_paths(engine_dir):
+    candidate_paths = list(_iter_engine_config_paths(engine_dir))
+    for config_path in candidate_paths:
         if _patch_missing_vocab_size(config_path, fallback_vocab_size=fallback_vocab_size):
             patched = True
             break
-    return patched
+
+    if patched or fallback_vocab_size is None:
+        return patched
+
+    # No existing configuration could be updated (very old conversion artefacts
+    # sometimes ship without a writable ``config.json``).  Create a minimal
+    # metadata file so that TensorRT-LLM v1.0+ has the information it needs.
+    config_path = engine_dir / "config.json"
+    fallback_int = int(fallback_vocab_size)
+
+    # Reuse the first readable configuration as a template if available.
+    template_data = None
+    for candidate in candidate_paths:
+        try:
+            template_data = json.loads(candidate.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        else:
+            break
+
+    if not isinstance(template_data, dict):
+        template_data = {}
+
+    builder_cfg = template_data.setdefault("builder_config", {})
+    if builder_cfg.get("vocab_size") == fallback_int:
+        # A separate config file already contains the correct value but the
+        # runtime could not read it (for example because it lives inside a
+        # nested directory).  Copy it to the expected location.
+        try:
+            config_path.write_text(json.dumps(template_data, indent=2, sort_keys=True))
+        except OSError:
+            return False
+        return True
+
+    builder_cfg["vocab_size"] = fallback_int
+
+    try:
+        config_path.write_text(json.dumps(template_data, indent=2, sort_keys=True))
+    except OSError:
+        return False
+
+    warnings.warn(
+        "Created TensorRT engine 'config.json' with inferred builder_config.vocab_size=%d. "
+        "Consider regenerating the engine with up-to-date tooling." % fallback_int,
+        RuntimeWarning,
+    )
+    return True
 
 
 def create_model_runner(

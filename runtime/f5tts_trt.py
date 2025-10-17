@@ -65,6 +65,8 @@ class F5TTSTRT:
         num_heads = model_cfg.arch.heads
         mel_dim = model_cfg.mel_spec.n_mel_channels
 
+        vocab_char_map, vocab_size = get_tokenizer(vocab_file)
+
         transformer_trt = F5DiTTRT(
             ckpt_path=str(ckpt_file),
             trt_dit_dir=str(trt_dit_dir),
@@ -73,6 +75,7 @@ class F5TTSTRT:
             num_heads=num_heads,
             dtype=torch.float16,
             device=self.device,
+            tokenizer_vocab_size=vocab_size,
         )
 
         # --- CFM, куда подсовываем наш transformer ---
@@ -87,7 +90,7 @@ class F5TTSTRT:
                 n_fft=model_cfg.mel_spec.n_fft,
                 win_length=model_cfg.mel_spec.win_length,
             ),
-            vocab_char_map=get_tokenizer(vocab_file)[0],
+            vocab_char_map=vocab_char_map,
         )
 
         self.use_ema = use_ema

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import random
@@ -54,15 +55,7 @@ class F5TTSTRT:
         self.target_sample_rate = model_cfg.mel_spec.target_sample_rate
 
         # устройство
-        if device is not None:
-            self.device = device
-        else:
-            self.device = (
-                "cuda" if torch.cuda.is_available() else
-                "xpu" if torch.xpu.is_available() else
-                "mps" if torch.backends.mps.is_available() else
-                "cpu"
-            )
+        self.device = self._resolve_device(device)
 
         # --- TRT Vocoder ---
         self.vocoder = VocoderTRT(str(trt_vocoder_dir), device=self.device, dtype=torch.float16)
@@ -99,6 +92,68 @@ class F5TTSTRT:
 
         self.use_ema = use_ema
         self.ode_method = ode_method
+
+    @staticmethod
+    def _resolve_device(device: str | None) -> str:
+        """Validate and normalise device strings before they reach PyTorch/TRT."""
+        # Auto-detect when nothing is specified (kept consistent with the original
+        # behaviour).
+        if device is None:
+            if torch.cuda.is_available():
+                return "cuda"
+            if hasattr(torch, "xpu") and torch.xpu.is_available():  # type: ignore[attr-defined]
+                return "xpu"
+            if torch.backends.mps.is_available():
+                return "mps"
+            return "cpu"
+
+        normalized = device.strip().lower()
+
+        def _warn_and_fallback(msg: str) -> str:
+            warnings.warn(msg, RuntimeWarning)
+            if torch.cuda.is_available():
+                # Default CUDA device keeps compatibility with TensorRT runtime.
+                return "cuda"
+            if hasattr(torch, "xpu") and torch.xpu.is_available():  # type: ignore[attr-defined]
+                return "xpu"
+            if torch.backends.mps.is_available():
+                return "mps"
+            return "cpu"
+
+        if normalized.startswith("cuda"):
+            if not torch.cuda.is_available():
+                raise RuntimeError("Requested CUDA device but CUDA is not available in this environment.")
+
+            if ":" in normalized:
+                _, index_str = normalized.split(":", 1)
+                try:
+                    index = int(index_str)
+                except ValueError as exc:  # pragma: no cover - defensive branch
+                    raise ValueError(f"Invalid CUDA device specification: '{device}'.") from exc
+
+                cuda_count = torch.cuda.device_count()
+                if index < 0 or index >= cuda_count:
+                    return _warn_and_fallback(
+                        f"CUDA device index {index} is out of range for {cuda_count} available device(s); "
+                        "falling back to the default GPU."
+                    )
+                return f"cuda:{index}"
+            return "cuda"
+
+        if normalized.startswith("xpu"):
+            if not (hasattr(torch, "xpu") and torch.xpu.is_available()):  # type: ignore[attr-defined]
+                raise RuntimeError("Requested XPU device but XPU is not available in this environment.")
+            return "xpu"
+
+        if normalized.startswith("mps"):
+            if not torch.backends.mps.is_available():
+                raise RuntimeError("Requested MPS device but MPS is not available in this environment.")
+            return "mps"
+
+        if normalized == "cpu":
+            return "cpu"
+
+        raise ValueError(f"Unsupported device specification: '{device}'.")
 
     # --- экспорт аналогично src/f5tts.py ---
     def export_wav(self, wav, file_wave: Path, remove_silence: bool = False):

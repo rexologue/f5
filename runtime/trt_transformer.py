@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import math
-import inspect
 from typing import Optional, Tuple, Dict
 
 import torch
 import torch.nn as nn
-from tensorrt_llm.runtime import ModelRunner
+from trt_utils import create_model_runner
 
 # === берем "нормальные" классы из твоего src/core/dit.py ===
 from src.core.dit import (
@@ -32,9 +31,7 @@ class _DiTRuntime:
       outputs: 'hidden'
     """
     def __init__(self, engine_dir: str, device: str = "cuda", dtype: torch.dtype = torch.float16):
-        init_sig = inspect.signature(ModelRunner.__init__)
-        runner_kwargs = {"device": device} if "device" in init_sig.parameters else {}
-        self.runner = ModelRunner(engine_dir, **runner_kwargs)
+        self.runner = create_model_runner(engine_dir, device=device)
         self.device = torch.device(device)
         self.dtype = dtype
 

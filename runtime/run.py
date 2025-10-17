@@ -1,11 +1,12 @@
 from pathlib import Path
-from f5tts_trt import F5TTS
+from f5tts_trt import F5TTSTRT
 
-f5tts = F5TTS(
-    config_path=Path("/home/user5/f5_trt/trt_f5_engine"),           # директория с config.json и rank*.engine
+f5tts = F5TTSTRT(  
+    config_path=Path("/home/user5/f5/model.yaml"),
     vocab_file=Path("/home/user5/f5_model/vocab.txt"),
     ckpt_file=Path("/home/user5/f5_model/espeech_tts_rlv2.pt"),
-    vocoder_trt_engine_path=Path("/home/user5/f5_trt/vocoder_engine.plan"),    
+    trt_dit_dir=Path("/home/user5/f5_new_trt/trt_f5_engine"),        
+    trt_vocoder_dir=Path("/home/user5/f5_new_trt/vocoder_engine.plan"),    
     device="cuda:5",
 )
 

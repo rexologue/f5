@@ -1,12 +1,19 @@
 # runtime/f5tts_trt.py
 from __future__ import annotations
+
+import os
 import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import random
 from pathlib import Path
 
 import torch
 import soundfile as sf
 import tqdm
+
+from setup.utils import preload_libpython
+preload_libpython()
 
 from src.utils_infer import (
     infer_process,
@@ -17,20 +24,10 @@ from src.utils_infer import (
 from src.core.utils import seed_everything
 from src.settings.structure import load_settings
 
-from .trt_transformer import F5DiTTRT
-from .trt_vocoder import VocoderTRT
+from trt_transformer import F5DiTTRT
+from trt_vocoder import VocoderTRT
 from src.core.cfm import CFM  # твой CFM из src/core/cfm.py (если путь другой — поправь импорт)
-
-
-def _build_vocab_map(vocab_file: Path) -> dict[str, int]:
-    # простая загрузка: по строкам -> id
-    vocab = {}
-    with open(vocab_file, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            token = line.rstrip("\n")
-            if token and token not in vocab:
-                vocab[token] = i
-    return vocab
+from src.core.utils import get_tokenizer
 
 
 class F5TTSTRT:
@@ -71,8 +68,8 @@ class F5TTSTRT:
         self.vocoder = VocoderTRT(str(trt_vocoder_dir), device=self.device, dtype=torch.float16)
 
         # --- TRT DiT transformer (эмбеддинги/финал — на Torch) ---
-        hidden = model_cfg.arch.hidden_size
-        num_heads = model_cfg.arch.num_attention_heads
+        hidden = model_cfg.arch.dim
+        num_heads = model_cfg.arch.heads
         mel_dim = model_cfg.mel_spec.n_mel_channels
 
         transformer_trt = F5DiTTRT(
@@ -97,7 +94,7 @@ class F5TTSTRT:
                 n_fft=model_cfg.mel_spec.n_fft,
                 win_length=model_cfg.mel_spec.win_length,
             ),
-            vocab_char_map=_build_vocab_map(vocab_file),
+            vocab_char_map=get_tokenizer(vocab_file)[0],
         )
 
         self.use_ema = use_ema

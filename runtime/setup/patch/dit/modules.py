@@ -67,45 +67,6 @@ class AdaLayerNormZero(Module):
         return x, gate_msa, shift_mlp, scale_mlp, gate_mlp
 
 
-class AdaLayerNormZero_Final(Module):
-    def __init__(self, dim):
-        super().__init__()
-
-        self.linear = Linear(dim, dim * 2)
-
-        self.norm = LayerNorm(dim, elementwise_affine=False, eps=1e-6)
-
-    def forward(self, x, emb):
-        emb = self.linear(silu(emb))
-        scale, shift = chunk(emb, 2, dim=1)
-        ones = constant(np.ones(1, dtype=np.float32)).cast(x.dtype)
-        if default_net().plugin_config.remove_input_padding:
-            x = self.norm(x) * (ones + scale) + shift
-        else:
-            x = self.norm(x) * unsqueeze((ones + scale), 1)
-            x = x + unsqueeze(shift, 1)
-        return x
-
-
-class ConvPositionEmbedding(Module):
-    def __init__(self, dim, kernel_size=31, groups=16):
-        super().__init__()
-        assert kernel_size % 2 != 0
-        self.conv1d1 = Conv1d(dim, dim, kernel_size, groups=groups, padding=kernel_size // 2)
-        self.conv1d2 = Conv1d(dim, dim, kernel_size, groups=groups, padding=kernel_size // 2)
-        self.mish = Mish()
-
-    def forward(self, x, mask=None):  # noqa: F722
-        if default_net().plugin_config.remove_input_padding:
-            x = unsqueeze(x, 0)
-        x = permute(x, [0, 2, 1])
-        x = self.mish(self.conv1d2(self.mish(self.conv1d1(x))))
-        out = permute(x, [0, 2, 1])
-        if default_net().plugin_config.remove_input_padding:
-            out = squeeze(out, 0)
-        return out
-
-
 class Attention(Module):
     def __init__(
         self,
@@ -397,16 +358,3 @@ class DiTBlock(Module):
 
         return x
 
-
-class TimestepEmbedding(Module):
-    def __init__(self, dim, freq_embed_dim=256, dtype=None):
-        super().__init__()
-        # self.time_embed = SinusPositionEmbedding(freq_embed_dim)
-        self.mlp1 = Linear(freq_embed_dim, dim, bias=True, dtype=dtype)
-        self.mlp2 = Linear(dim, dim, bias=True, dtype=dtype)
-
-    def forward(self, timestep):
-        t_freq = self.mlp1(timestep)
-        t_freq = silu(t_freq)
-        t_emb = self.mlp2(t_freq)
-        return t_emb

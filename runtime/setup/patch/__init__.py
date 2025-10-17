@@ -34,7 +34,6 @@ from .deepseek_v2.model import DeepseekV2ForCausalLM
 from .dit.model import DiT
 from .eagle.model import EagleForCausalLM
 from .enc_dec.model import DecoderModel, EncoderModel, WhisperEncoder
-from .f5tts.model import F5TTS
 from .falcon.config import FalconConfig
 from .falcon.model import FalconForCausalLM, FalconModel
 from .gemma.config import GEMMA2_ARCHITECTURE, GEMMA_ARCHITECTURE, GemmaConfig
@@ -125,8 +124,7 @@ __all__ = [
     "EagleForCausalLM",
     "SpeculativeDecodingMode",
     "CohereForCausalLM",
-    "MLLaMAModel",
-    "F5TTS",
+    "MLLaMAModel"
 ]
 
 MODEL_MAP = {
@@ -194,6 +192,5 @@ MODEL_MAP = {
     "BertModel": BertModel,
     "RobertaModel": RobertaModel,
     "RobertaForQuestionAnswering": RobertaForQuestionAnswering,
-    "RobertaForSequenceClassification": RobertaForSequenceClassification,
-    "F5TTS": F5TTS,
+    "RobertaForSequenceClassification": RobertaForSequenceClassification
 }

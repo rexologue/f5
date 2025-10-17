@@ -67,3 +67,5 @@ Decoding on a single L20 GPU, using 26 different prompt_audio & target_text pair
 
 ### Credits
 1. [F5-TTS-TRTLLM](https://github.com/Bigfishering/f5-tts-trtllm)
+
+https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.13.3/tars/TensorRT-10.13.3.9.Linux.x86_64-gnu.cuda-12.9.tar.gz

@@ -30,32 +30,38 @@ class DiT(PretrainedModel):
         return h
 
     def prepare_inputs(self, **kwargs):
+        def profile(min_val, opt_val, max_val):
+            return [(min_val, opt_val, max_val)]
+
+        def static_profile(val):
+            return profile(val, val, val)
+
         max_batch_size = kwargs.get("max_batch_size", 2)
-        bs_range = [2, 2, max_batch_size]
+        batch_profile = profile(2, 2, max_batch_size)
         max_seq_len = kwargs.get("max_seq_len", 4096)
         head_dim = self.dim_head
         hidden = self.dim
 
         if default_net().plugin_config.remove_input_padding:
-            num_frames_range = [[200, max_seq_len, max_seq_len * max_batch_size]]
+            num_frames_profile = profile(200, max_seq_len, max_seq_len * max_batch_size)
             x = Tensor("x", dtype=self.config.dtype, shape=[-1, hidden],
-                       dim_range=OrderedDict([("num_frames", num_frames_range), ("hidden", [[hidden]])]))
+                       dim_range=OrderedDict([("num_frames", num_frames_profile), ("hidden", static_profile(hidden))]))
             t = Tensor("t", dtype=self.config.dtype, shape=[-1, hidden],
-                       dim_range=OrderedDict([("num_frames", num_frames_range), ("hidden", [[hidden]])]))
+                       dim_range=OrderedDict([("num_frames", num_frames_profile), ("hidden", static_profile(hidden))]))
             rope_cos = Tensor("rope_cos", dtype=self.config.dtype, shape=[-1, head_dim],
-                              dim_range=OrderedDict([("num_frames", num_frames_range), ("head_dim", [[head_dim]])]))
+                              dim_range=OrderedDict([("num_frames", num_frames_profile), ("head_dim", static_profile(head_dim))]))
             rope_sin = Tensor("rope_sin", dtype=self.config.dtype, shape=[-1, head_dim],
-                              dim_range=OrderedDict([("num_frames", num_frames_range), ("head_dim", [[head_dim]])]))
+                              dim_range=OrderedDict([("num_frames", num_frames_profile), ("head_dim", static_profile(head_dim))]))
         else:
-            t_range = [[100, max_seq_len // 2, max_seq_len]]
+            time_profile = profile(100, max_seq_len // 2, max_seq_len)
             x = Tensor("x", dtype=self.config.dtype, shape=[-1, -1, hidden],
-                       dim_range=OrderedDict([("batch", [bs_range]), ("time", t_range), ("hidden", [[hidden]])]))
+                       dim_range=OrderedDict([("batch", batch_profile), ("time", time_profile), ("hidden", static_profile(hidden))]))
             t = Tensor("t", dtype=self.config.dtype, shape=[-1, hidden],
-                       dim_range=OrderedDict([("batch", [bs_range]), ("hidden", [[hidden]])]))
+                       dim_range=OrderedDict([("batch", batch_profile), ("hidden", static_profile(hidden))]))
             rope_cos = Tensor("rope_cos", dtype=self.config.dtype, shape=[-1, -1, head_dim],
-                              dim_range=OrderedDict([("batch", [bs_range]), ("time", t_range), ("head_dim", [[head_dim]])]))
+                              dim_range=OrderedDict([("batch", batch_profile), ("time", time_profile), ("head_dim", static_profile(head_dim))]))
             rope_sin = Tensor("rope_sin", dtype=self.config.dtype, shape=[-1, -1, head_dim],
-                              dim_range=OrderedDict([("batch", [bs_range]), ("time", t_range), ("head_dim", [[head_dim]])]))
+                              dim_range=OrderedDict([("batch", batch_profile), ("time", time_profile), ("head_dim", static_profile(head_dim))]))
         input_lengths = Tensor("input_lengths", dtype=trt.int32, shape=[-1],
-                               dim_range=OrderedDict([("batch", [[2, 2, max_batch_size]])]))
+                               dim_range=OrderedDict([("batch", batch_profile)]))
         return {"x": x, "t": t, "rope_cos": rope_cos, "rope_sin": rope_sin, "input_lengths": input_lengths}

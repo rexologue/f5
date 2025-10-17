@@ -2,10 +2,71 @@
 from __future__ import annotations
 
 import inspect
+import json
+import warnings
 from pathlib import Path
 from typing import Union
 
 from tensorrt_llm.runtime import ModelRunner
+
+
+def _patch_missing_vocab_size(config_path: Path) -> bool:
+    """Ensure ``builder_config.vocab_size`` exists in TensorRT engine configs.
+
+    TensorRT-LLM 1.0 tightened validation around the vocabulary size stored in
+    the generated ``config.json``.  Engines converted before this requirement
+    may omit the field altogether, which causes ``ModelRunner.from_dir`` to
+    crash when it attempts to pad the vocabulary size.  The exact value is not
+    used by our TTS models, so we fall back to the closest reasonable value we
+    can infer from the remaining metadata.
+
+    Parameters
+    ----------
+    config_path:
+        Path to the ``config.json`` file inside the engine directory.
+
+    Returns
+    -------
+    bool
+        ``True`` when the configuration file was updated, ``False`` otherwise.
+    """
+
+    if not config_path.exists():
+        return False
+
+    try:
+        data = json.loads(config_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    builder_cfg = data.setdefault("builder_config", {})
+    vocab_size = builder_cfg.get("vocab_size")
+    if vocab_size is not None:
+        return False
+
+    fallback = (
+        data.get("pretrained_config", {}).get("vocab_size")
+        or data.get("tokenizer", {}).get("vocab_size")
+        or data.get("tokenizer", {}).get("model", {}).get("vocab_size")
+    )
+
+    if fallback is None:
+        fallback = 0
+
+    builder_cfg["vocab_size"] = int(fallback)
+
+    try:
+        config_path.write_text(json.dumps(data, indent=2, sort_keys=True))
+    except OSError:
+        return False
+
+    warnings.warn(
+        "TensorRT engine configuration lacked 'builder_config.vocab_size'. "
+        "Inserted fallback value %d to keep ModelRunner initialisation "
+        "compatible with TensorRT-LLM 1.0." % builder_cfg["vocab_size"],
+        RuntimeWarning,
+    )
+    return True
 
 
 def create_model_runner(engine_path: Union[str, Path], *, device: Union[str, int] | None = None) -> ModelRunner:
@@ -37,7 +98,20 @@ def create_model_runner(engine_path: Union[str, Path], *, device: Union[str, int
         engine_dir = engine_path if engine_path.is_dir() else engine_path.parent
         if not engine_dir.exists():
             raise FileNotFoundError(f"TensorRT engine directory '{engine_dir}' does not exist")
-        return ModelRunner.from_dir(str(engine_dir))
+
+        try:
+            return ModelRunner.from_dir(str(engine_dir))
+        except TypeError as exc:
+            # TensorRT-LLM raises a cryptic ``TypeError`` when ``vocab_size`` is
+            # missing.  Patch the config and retry once before surfacing the
+            # original failure.
+            if "NoneType" not in str(exc):
+                raise
+
+            config_path = engine_dir / "config.json"
+            if not _patch_missing_vocab_size(config_path):
+                raise
+            return ModelRunner.from_dir(str(engine_dir))
 
     runner_kwargs = {}
     if device is not None and "device" in init_sig.parameters:

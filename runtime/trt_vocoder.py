@@ -44,23 +44,53 @@ class _TensorRTPlanRunner:
         self.engine = engine
         self.context = context
         self.profile_index = 0
-        self._bindings_template: List[int] = [0] * self.engine.num_bindings
+
+        if hasattr(self.engine, "num_bindings"):
+            num_bindings = self.engine.num_bindings
+        elif hasattr(self.engine, "num_io_tensors"):
+            num_bindings = self.engine.num_io_tensors
+        else:
+            raise AttributeError(
+                "TensorRT engine does not expose 'num_bindings' or 'num_io_tensors' attributes"
+            )
+
+        self._bindings_template: List[int] = [0] * num_bindings
         self._uses_tensor_addresses = hasattr(self.context, "set_tensor_address")
         self._supports_input_api = hasattr(self.context, "set_input_shape")
 
-        input_indices = [idx for idx in range(self.engine.num_bindings) if self.engine.binding_is_input(idx)]
-        output_indices = [idx for idx in range(self.engine.num_bindings) if not self.engine.binding_is_input(idx)]
+        if hasattr(self.engine, "binding_is_input"):
+            input_indices = [idx for idx in range(num_bindings) if self.engine.binding_is_input(idx)]
+            output_indices = [idx for idx in range(num_bindings) if not self.engine.binding_is_input(idx)]
 
-        if len(input_indices) != 1 or len(output_indices) != 1:
-            raise ValueError("The TensorRT vocoder engine must expose exactly one input and one output binding")
+            if len(input_indices) != 1 or len(output_indices) != 1:
+                raise ValueError(
+                    "The TensorRT vocoder engine must expose exactly one input and one output binding"
+                )
 
-        self.input_index = input_indices[0]
-        self.output_index = output_indices[0]
-        self.input_name = self.engine.get_binding_name(self.input_index)
-        self.output_name = self.engine.get_binding_name(self.output_index)
+            self.input_index = input_indices[0]
+            self.output_index = output_indices[0]
+            self.input_name = self.engine.get_binding_name(self.input_index)
+            self.output_name = self.engine.get_binding_name(self.output_index)
 
-        input_dtype = self.engine.get_binding_dtype(self.input_index)
-        output_dtype = self.engine.get_binding_dtype(self.output_index)
+            input_dtype = self.engine.get_binding_dtype(self.input_index)
+            output_dtype = self.engine.get_binding_dtype(self.output_index)
+        else:
+            tensor_names = [self.engine.get_tensor_name(i) for i in range(num_bindings)]
+            input_names = [name for name in tensor_names if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT]
+            output_names = [name for name in tensor_names if self.engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT]
+
+            if len(input_names) != 1 or len(output_names) != 1:
+                raise ValueError(
+                    "The TensorRT vocoder engine must expose exactly one input and one output tensor"
+                )
+
+            self.input_name = input_names[0]
+            self.output_name = output_names[0]
+            self.input_index = self.engine.get_tensor_index(self.input_name)
+            self.output_index = self.engine.get_tensor_index(self.output_name)
+
+            input_dtype = self.engine.get_tensor_dtype(self.input_name)
+            output_dtype = self.engine.get_tensor_dtype(self.output_name)
         if input_dtype not in _TRT_TO_TORCH_DTYPE or output_dtype not in _TRT_TO_TORCH_DTYPE:
             raise TypeError("Unsupported TensorRT binding data type for vocoder engine")
 
@@ -80,13 +110,22 @@ class _TensorRTPlanRunner:
 
         if self._supports_input_api:
             self.context.set_input_shape(self.input_name, batch_shape)
-        else:
+        elif hasattr(self.context, "set_binding_shape"):
             self.context.set_binding_shape(self.input_index, batch_shape)
+        elif hasattr(self.context, "set_tensor_shape"):
+            self.context.set_tensor_shape(self.input_name, batch_shape)
+        else:
+            raise AttributeError("TensorRT execution context does not support setting input shapes")
 
         if hasattr(self.context, "all_binding_shapes_specified") and not self.context.all_binding_shapes_specified:
             raise RuntimeError("Not all TensorRT binding shapes were specified for the vocoder engine")
 
-        output_shape = tuple(self.context.get_binding_shape(self.output_index))
+        if hasattr(self.context, "get_binding_shape"):
+            output_shape = tuple(self.context.get_binding_shape(self.output_index))
+        elif hasattr(self.context, "get_tensor_shape"):
+            output_shape = tuple(self.context.get_tensor_shape(self.output_name))
+        else:
+            raise AttributeError("TensorRT execution context does not expose output shape retrieval APIs")
         audio = torch.empty(output_shape, device=self.device, dtype=self.output_dtype)
 
         if self._uses_tensor_addresses:

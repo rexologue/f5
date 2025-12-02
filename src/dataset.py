@@ -11,8 +11,8 @@ from tqdm import tqdm
 from datasets import load_from_disk
 from datasets import Dataset as Dataset_
 
-from utils import default
-from modules import MelSpec
+from core.utils import default
+from core.modules import MelSpec
 
 
 class HFDataset(Dataset):

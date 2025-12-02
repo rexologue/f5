@@ -139,19 +139,19 @@ class F5TTS:
 
 if __name__ == "__main__":
     f5tts = F5TTS(
-        config_path=Path("/home/user5/f5/model.yaml"),
-        vocab_file=Path("/home/user5/f5_model/vocab.txt"),
-        ckpt_file=Path("/home/user5/f5_model/espeech_tts_rlv2.pt"),
-        vocoder_local_path=Path("/home/user5/f5_model"),
-        device="cuda:5"
+        config_path=Path("/home/user5/audio/f5/model.yaml"),
+        vocab_file=Path("/home/user5/audio/.models/f5/vocab.txt"),
+        ckpt_file=Path("/home/user5/audio/.models/f5/espeech_tts_rlv2.pt"),
+        vocoder_local_path=Path("/home/user5/audio/.models/f5"),
+        device="cuda:6"
     )
 
     wav, sr, spec = f5tts.infer(
-        ref_file="/home/user5/ref.wav",
+        ref_file="/home/user5/audio/audio_stuff/ref/ref_anast.mp3",
         ref_text="то есть вы представьте себе планка два и семь, где-то какие-то сучки, на маленьком кусочке это просто будет не видно. ну вы же сами понимаете это.",
-        gen_text="""Без сучка и задоринки, говорили они - кто бы мог подумать!""",
+        gen_text="""Елена, а как вы относитесь к обучению онлайн? У нас стартует курс по развитию карьеры и повышению дохода, в группе с куратором, и вы как раз подходите под условия участия со скидкой.+ ' \n " . ' n ... \n '""",
         nfe_step=16,
-        file_wave="/home/user5/out1.wav",
+        file_wave="../out1.wav",
         seed=None,
     )
 

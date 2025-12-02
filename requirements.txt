@@ -76,6 +76,7 @@ msgpack==1.1.2
 multidict==6.7.0
 multiprocess==0.70.16
 networkx==3.5
+neptune==1.11.0
 ninja==1.13.0
 numba==0.62.1
 numpy==1.26.4

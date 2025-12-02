@@ -1,12 +1,13 @@
-import sys
 import random
+import sys
 from pathlib import Path
-from importlib.resources import files
 
-import tqdm
-import torch
 import soundfile as sf
+import torch
+import tqdm
 
+from .core.utils import seed_everything
+from .settings.structure import load_settings
 from .utils_infer import (
     infer_process,
     load_model,
@@ -16,8 +17,6 @@ from .utils_infer import (
     save_spectrogram,
 )
 
-from .core.utils import seed_everything
-from .settings.structure import load_settings
 
 class F5TTS:
     def __init__(
@@ -29,9 +28,8 @@ class F5TTS:
         *,
         ode_method="euler",
         use_ema=True,
-        device=None
+        device=None,
     ) -> None:
-        
         model_cfg = load_settings(config_path)
 
         model_arc = model_cfg.arch
@@ -54,24 +52,23 @@ class F5TTS:
                 else "cpu"
             )
 
-        # Load models
         self.vocoder = load_vocoder(
-            vocoder_local_path, 
-            self.device, 
+            vocoder_local_path,
+            self.device,
         )
 
         self.ema_model = load_model(
-            model_arc.model_dump(), 
-            ckpt_file, 
-            vocab_file, 
-            self.ode_method, 
+            model_arc.model_dump(),
+            ckpt_file,
+            vocab_file,
+            self.ode_method,
             model_cfg.mel_spec.n_fft,
             model_cfg.mel_spec.hop_length,
             model_cfg.mel_spec.win_length,
             model_cfg.mel_spec.n_mel_channels,
             model_cfg.mel_spec.target_sample_rate,
-            use_ema=self.use_ema, 
-            device=self.device
+            use_ema=self.use_ema,
+            device=self.device,
         )
 
     def export_wav(self, wav, file_wave, remove_silence=False):
@@ -110,7 +107,7 @@ class F5TTS:
 
         ref_file, ref_text = preprocess_ref_audio_text(ref_file, ref_text)
 
-        wav, sr, spec = infer_process( # type: ignore
+        wav, sr, spec = infer_process(
             ref_file,
             ref_text,
             gen_text,
@@ -137,22 +134,4 @@ class F5TTS:
         return wav, sr, spec
 
 
-if __name__ == "__main__":
-    f5tts = F5TTS(
-        config_path=Path("/home/user5/audio/f5/model.yaml"),
-        vocab_file=Path("/home/user5/audio/.models/f5/vocab.txt"),
-        ckpt_file=Path("/home/user5/audio/.models/f5/espeech_tts_rlv2.pt"),
-        vocoder_local_path=Path("/home/user5/audio/.models/f5"),
-        device="cuda:6"
-    )
-
-    wav, sr, spec = f5tts.infer(
-        ref_file="/home/user5/audio/audio_stuff/ref/ref_anast.mp3",
-        ref_text="то есть вы представьте себе планка два и семь, где-то какие-то сучки, на маленьком кусочке это просто будет не видно. ну вы же сами понимаете это.",
-        gen_text="""Елена, а как вы относитесь к обучению онлайн? У нас стартует курс по развитию карьеры и повышению дохода, в группе с куратором, и вы как раз подходите под условия участия со скидкой.+ ' \n " . ' n ... \n '""",
-        nfe_step=16,
-        file_wave="../out1.wav",
-        seed=None,
-    )
-
-    print("seed :", f5tts.seed)
+__all__ = ["F5TTS"]

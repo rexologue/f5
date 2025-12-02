@@ -1,0 +1,58 @@
+# Path config
+paths:
+  save_dir: "/root/ckps"             # Root directory where checkpoints and samples will be saved.
+  model_config: "configs/model.yaml"  # Path to model architecture config for CFM.
+  vocab_path: "data/vocab.json"       # Path to tokenizer / vocabulary config.
+  init_checkpoint: null               # Path to checkpoint to resume from, or null to start from scratch.
+  vocoder_path: "models/vocos"       # Directory containing Vocos config and weights.
+
+# Data config
+data:
+  train_manifest: "data/train.csv"   # Path to training manifest with columns audio_path|text|duration.
+  val_manifest: "data/val.csv"       # Optional validation manifest.
+  num_workers: 4                      # Number of dataloader workers per process.
+  batch_type: "dynamic"              # Only dynamic batch is supported.
+  max_tokens_per_batch: 32000         # Maximum number of mel frames per batch.
+  max_samples_per_batch: 32           # Safety cap on samples per batch.
+  max_audio_length_seconds: 15.0      # Optional: filter / control audio length.
+  manifest_delimiter: "|"             # Delimiter for manifest files.
+
+# Training config
+training:
+  epochs: 10                          # Number of training epochs.
+  learning_rate: 1.0e-4               # Base learning rate.
+  weight_decay: 0.01                  # Weight decay for AdamW.
+  grad_accumulation_steps: 1          # Gradient accumulation steps.
+  grad_clip_norm: 1.0                 # Gradient clipping value (or null to disable).
+  num_warmup_updates: 20000           # Number of warmup steps for LR scheduler.
+  save_every_steps: 1000              # Save checkpoint and samples every N global steps.
+  ema_decay: 0.999                    # EMA decay (if used).
+  use_ema: true                       # Whether to use EMA weights.
+
+# Neptune logging config
+neptune:
+  enabled: true                       # Enable or disable Neptune logging.
+  project: "user/project"             # Neptune project name.
+  experiment_name: "f5-tts-train"    # Run name.
+  api_token: null                     # Optional; if null, take from NEPTUNE_API_TOKEN env.
+  env_path: ".env"                    # Optional path to .env file with NEPTUNE_API_TOKEN.
+  dependencies_path: null             # Optional path to requirements file for Neptune.
+  run_id: null                        # Optional existing run ID to resume logging.
+  tags: ["tts", "f5", "experiment"] # List of tags.
+
+# Sampling config
+sampling:
+  ref_audio_path: "assets/ref.wav"   # Path to reference audio file.
+  ref_text: "Пример референсного текста." # Reference text string.
+  sample_texts_csv: "assets/sample_texts.csv" # Path to CSV with id|text pairs.
+  nfe_step: 32                        # Number of inference steps when generating samples.
+  cfg_strength: 2.0                   # CFG strength during sampling.
+  sway_sampling_coef: -1.0            # Sway sampling coefficient.
+  duration_multiplier: 2.0            # Generated duration multiplier relative to reference length.
+
+# Misc / environment
+env:
+  seed: 42                            # Random seed.
+  device: "cuda"                      # "cuda" or "cpu".
+  fp16: true                          # Whether to use mixed precision.
+  distributed: true                   # Whether to use distributed training.

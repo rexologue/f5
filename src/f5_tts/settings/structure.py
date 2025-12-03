@@ -25,6 +25,7 @@ class MelSettings(BaseModel):
     hop_length: int
     win_length: int
     n_fft: int
+    mel_spec_type: str = "vocos"
 
 
 class ModelSettings(BaseModel):

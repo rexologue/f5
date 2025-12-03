@@ -20,3 +20,4 @@ mel_spec:
   hop_length: 256
   win_length: 1024
   n_fft: 1024
+  mel_spec_type: vocos

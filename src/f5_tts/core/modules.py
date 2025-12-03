@@ -70,6 +70,7 @@ class MelSpec(nn.Module):
         win_length=1024,
         n_mel_channels=100,
         target_sample_rate=24_000,
+        mel_spec_type: str = "vocos",
     ):
         super().__init__()
 
@@ -78,8 +79,12 @@ class MelSpec(nn.Module):
         self.win_length = win_length
         self.n_mel_channels = n_mel_channels
         self.target_sample_rate = target_sample_rate
+        self.mel_spec_type = mel_spec_type
 
-        self.extractor = get_vocos_mel_spectrogram
+        if mel_spec_type == "vocos":
+            self.extractor = get_vocos_mel_spectrogram
+        else:
+            raise ValueError(f"Unsupported mel_spec_type: {mel_spec_type}")
 
         self.register_buffer("dummy", torch.tensor(0), persistent=False)
 

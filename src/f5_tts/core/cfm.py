@@ -322,7 +322,6 @@ class CFM(nn.Module):
 
         batch, seq_len = inp.shape[0], inp.shape[1]
         dtype, device = inp.dtype, self.device
-        _ = self.sigma  # резерв (не используется)
 
         # --- 2) Текст: ids или список строк ---
         if isinstance(text, list):

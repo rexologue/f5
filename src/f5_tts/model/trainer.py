@@ -17,6 +17,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from f5_tts import F5TTS
 from f5_tts.config import SamplingConfig, TrainingConfig
 from f5_tts.core.cfm import CFM
 from f5_tts.model.dataset import DynamicBatchConfig, create_dataloader
@@ -90,6 +91,12 @@ class Trainer:
             self._restore_state(resume_state)
 
         self.vocoder = None
+        self.ref_mel = None
+        self.ref_len = None
+        self.ref_text = None
+        self._inference_helper = None
+        if self.sampling_cfg:
+            self._load_sampling_assets()
 
     @property
     def is_main(self) -> bool:
@@ -161,8 +168,16 @@ class Trainer:
         self.current_epoch = state.get("epoch", 0)
 
     def _load_sampling_assets(self):
+        if not self.sampling_cfg:
+            return None
+
+        if self.ref_mel is not None and self.ref_len is not None:
+            return self.ref_mel, self.ref_len
+
         if self.vocoder is None and self.vocoder_path:
             self.vocoder = load_vocoder(Path(self.vocoder_path), self.accelerator.device)
+        elif self.vocoder is None:
+            raise RuntimeError("Vocoder not loaded; please provide paths.vocoder_path in config.")
 
         ref_audio_path = Path(self.sampling_cfg.ref_audio_path)
         ref_audio, ref_sr = torchaudio.load(str(ref_audio_path))
@@ -173,7 +188,24 @@ class Trainer:
         mel_spec = mel_spec.squeeze(0)
         ref_mel = mel_spec.permute(1, 0).unsqueeze(0)
         ref_len = ref_mel.shape[1]
-        return ref_mel, ref_len
+        self.ref_mel = ref_mel
+        self.ref_len = ref_len
+        self.ref_text = self.sampling_cfg.ref_text
+        self._build_inference_helper()
+        return self.ref_mel, self.ref_len
+
+    def _build_inference_helper(self):
+        if self._inference_helper is None and self.sampling_cfg:
+            helper = F5TTS.__new__(F5TTS)
+            helper.target_sample_rate = self.model.mel_spec.target_sample_rate
+            helper.device = self.accelerator.device
+            helper.ode_method = "euler"
+            helper.use_ema = False
+            helper.vocoder = self.vocoder
+            helper.ema_model = self.accelerator.unwrap_model(self.model)
+            self._inference_helper = helper
+
+        return self._inference_helper
 
     def _log_hyperparams_once(self):
         if self.logger:
@@ -187,10 +219,22 @@ class Trainer:
         self.model.eval()
 
         ref_mel, ref_len = self._load_sampling_assets()
+        if ref_mel is None or ref_len is None:
+            return
+
+        inference_helper = self._build_inference_helper()
+        if inference_helper is None:
+            raise RuntimeError("Inference helper could not be initialized for sampling.")
+
         sampling_steps = self.sampling_cfg.nfe_step or default_nfe_step
         cfg_strength = self.sampling_cfg.cfg_strength or default_cfg_strength
         sway_coef = self.sampling_cfg.sway_sampling_coef or default_sway_sampling
-        duration = int(ref_len * self.sampling_cfg.duration_multiplier)
+        ref_duration_seconds = (
+            ref_len
+            * self.model.mel_spec.hop_length
+            / self.model.mel_spec.target_sample_rate
+            * self.sampling_cfg.duration_multiplier
+        )
 
         samples_dir = checkpoint_dir / "samples"
         samples_dir.mkdir(exist_ok=True)
@@ -207,25 +251,25 @@ class Trainer:
             if len(row) < 2:
                 continue
             sample_id, text = row[0], row[1]
-            with torch.inference_mode():
-                generated, _ = self.accelerator.unwrap_model(self.model).sample(
-                    cond=ref_mel,
-                    text=[text],
-                    duration=duration,
-                    steps=sampling_steps,
-                    cfg_strength=cfg_strength,
-                    sway_sampling_coef=sway_coef,
-                )
-                generated = generated.to(torch.float32)
-                gen_mel_spec = generated[:, ref_len:, :].permute(0, 2, 1).to(self.accelerator.device)
-
-                if self.vocoder is None:
-                    raise RuntimeError("Vocoder not loaded; please provide paths.vocoder_path in config.")
-
-                gen_audio = self.vocoder.decode(gen_mel_spec).cpu()
+            gen_audio, sr, _ = inference_helper.infer_from_mel(
+                ref_mel,
+                self.ref_text,
+                text,
+                show_info=lambda *_: None,
+                progress=None,
+                nfe_step=sampling_steps,
+                cfg_strength=cfg_strength,
+                sway_sampling_coef=sway_coef,
+                fix_duration=ref_duration_seconds,
+                device=self.accelerator.device,
+            )
 
             filename = f"sample_{sample_id}.wav"
-            torchaudio.save(str(samples_dir / filename), gen_audio, self.model.mel_spec.target_sample_rate)
+            torchaudio.save(
+                str(samples_dir / filename),
+                torch.tensor(gen_audio).unsqueeze(0),
+                sr,
+            )
             metadata_rows.append({"id": sample_id, "text": text, "filename": filename})
 
         if previous_mode:

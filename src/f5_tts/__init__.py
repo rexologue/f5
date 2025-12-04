@@ -80,6 +80,61 @@ class F5TTS:
     def export_spectrogram(self, spec, file_spec):
         save_spectrogram(spec, file_spec)
 
+    def infer_from_mel(
+        self,
+        ref_mel,
+        ref_text,
+        gen_text,
+        show_info=print,
+        progress=tqdm,
+        target_rms=0.1,
+        cross_fade_duration=0.15,
+        sway_sampling_coef=-1,
+        cfg_strength=2,
+        nfe_step=32,
+        speed=1.0,
+        fix_duration=None,
+        remove_silence=False,
+        file_wave=None,
+        file_spec=None,
+        seed=None,
+        device=None,
+    ):
+        if seed is None:
+            seed = random.randint(0, sys.maxsize)
+
+        seed_everything(seed)
+        self.seed = seed
+
+        inference_device = device or self.device
+
+        wav, sr, spec = infer_process(
+            ref_mel,
+            ref_text,
+            gen_text,
+            self.ema_model,
+            self.vocoder,
+            show_info=show_info,
+            progress=progress,
+            target_rms=target_rms,
+            cross_fade_duration=cross_fade_duration,
+            nfe_step=nfe_step,
+            cfg_strength=cfg_strength,
+            sway_sampling_coef=sway_sampling_coef,
+            speed=speed,
+            fix_duration=fix_duration,
+            device=inference_device,
+            batch_process_type="from_mel",
+        )
+
+        if file_wave is not None:
+            self.export_wav(wav, file_wave, remove_silence)
+
+        if file_spec is not None:
+            self.export_spectrogram(spec, file_spec)
+
+        return wav, sr, spec
+
     def infer(
         self,
         ref_file,

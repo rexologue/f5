@@ -303,7 +303,7 @@ class Trainer:
                     progress_bar.update(1)
                     progress_bar.set_postfix(loss=loss.item(), step=self.global_step)
 
-                if self.logger:
+                if self.accelerator.sync_gradients and self.logger:
                     self.logger.save_metrics(
                         "train",
                         ["loss", "lr"],

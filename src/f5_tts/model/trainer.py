@@ -14,11 +14,13 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from tqdm import tqdm
 from ema_pytorch import EMA
+from ruaccent import RUAccent
 
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 
 from f5_tts import F5TTS
+from f5_tts.evaluation import SpeechEval
 from f5_tts.utils.logger import BaseLogger
 from f5_tts.utils_infer import load_vocoder
 from f5_tts.config import TrainConfig, SamplingConfig, TrainingConfig
@@ -92,8 +94,37 @@ class Trainer:
         
         if resume_state:
             self._restore_state(resume_state)
-
-
+            
+        if self.sampling_cfg:
+            self.evaluator = SpeechEval(
+                ref_wav=Path(self.sampling_cfg.ref_audio_path),
+                device=self.model.device
+            ) # type: ignore
+            
+            accentizer = RUAccent()
+            accentizer.load(omograph_model_size="turbo3.1", use_dictionary=True, tiny_mode=False, device="CUDA")
+            
+            self.val_texts = []
+            with open(self.sampling_cfg.sample_texts_csv, "r", encoding="utf-8") as f:
+                # Используем DictReader
+                reader = csv.reader(f, delimiter="|")
+                
+                for row in reader:
+                    try:
+                        text = row[1]
+                        
+                        if isinstance(text, str):
+                            self.val_texts.append(accentizer.process_all(text))
+                            
+                    except KeyError:
+                        # Обработка случая, если в строке нет ключа "text"
+                        print("Warning: column 1 must contain text")
+                        continue
+                    except Exception as e:
+                        # Обработка других возможных ошибок
+                        print(f"An error occurred: {e}")
+                        continue
+                    
     @property
     def is_main(self) -> bool:
         return self.accelerator.is_main_process
@@ -189,19 +220,9 @@ class Trainer:
         samples_dir.mkdir(exist_ok=True)
 
         metadata_rows = []
-        with open(self.sampling_cfg.sample_texts_csv, "r", encoding="utf-8") as f:
-            reader = csv.reader(f, delimiter="|")
-            rows = list(reader)
 
-        if rows and rows[0][:2] == ["id", "text"]:
-            rows = rows[1:]
-
-        for idx, row in enumerate(rows):
-            if len(row) < 2:
-                continue
-            
-            sample_id, text = row[0], row[1]
-            filename = samples_dir / f"sample_{sample_id}.wav"
+        for idx, text in enumerate(self.val_texts):
+            filename = samples_dir / f"sample_{idx}.wav"
             
             _, _, _ = self.tts.infer(
                 ref_file=self.sampling_cfg.ref_audio_path,
@@ -211,9 +232,10 @@ class Trainer:
                 nfe_step=self.sampling_cfg.nfe_step,
                 file_wave=filename,
                 seed=None,
+                progress=None
             )
 
-            metadata_rows.append({"id": sample_id, "text": text, "filename": filename})
+            metadata_rows.append({"id": idx, "text": text, "filename": filename})
 
         if previous_mode:
             self.model.train()
@@ -225,8 +247,16 @@ class Trainer:
             writer.writerows(metadata_rows)
 
         if self.logger:
-            rel_path = os.path.relpath(samples_dir, start=self.save_dir)
-            self.logger.save_metrics("samples", "path", rel_path, step=step)
+            metrics = self.evaluator(
+                self.val_texts,
+                [i["filename"] for i in metadata_rows]
+            )
+            self.logger.save_metrics(
+                "val",
+                list(metrics.keys()),    
+                list(metrics.values()),  
+                step=step
+            )
 
 
     def train(self):

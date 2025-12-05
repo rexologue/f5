@@ -52,11 +52,15 @@ class Trainer:
         self.full_config = full_config
         self.use_distributed = use_distributed
 
+        self.use_fp16 = use_fp16 and torch.cuda.is_available()
+        if use_fp16 and not torch.cuda.is_available():
+            print("FP16 requested but CUDA is unavailable; falling back to full precision training.")
+
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
             gradient_accumulation_steps=self.training_cfg.grad_accumulation_steps,
             kwargs_handlers=[ddp_kwargs],
-            mixed_precision="fp16" if use_fp16 else "no",
+            mixed_precision="fp16" if self.use_fp16 else "no",
         )
 
         self.tts = tts

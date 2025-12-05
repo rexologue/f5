@@ -310,7 +310,7 @@ def infer_process(
     gen_text,
     model_obj,
     vocoder,
-    batch_process_type="brand_new", # "classic", "from_mel"
+    batch_process_type="brand_new", # "classic"
     show_info=print,
     progress=tqdm,
     target_rms=target_rms,
@@ -322,35 +322,18 @@ def infer_process(
     fix_duration=fix_duration,
     device=device,
 ):
-    if batch_process_type == "from_mel":
-        ref_audio_length = ref_audio.shape[1] * hop_length / target_sample_rate
-        gen_text_batches = chunk_text(
-            gen_text,
-            max_chars=int(
-                len(ref_text.encode("utf-8"))
-                / max(ref_audio_length, 1e-3)
-                * max(22 - ref_audio_length, 1)
-                * speed
-            ),
-        )
-        batch_process = brand_new_infer_batch_process_mel
-        ref_payload = ref_audio
-    else:
-        # Split the input text into batches
-        audio, sr = torchaudio.load(ref_audio)
-        max_chars = int(
-            len(ref_text.encode("utf-8")) / (audio.shape[-1] / sr) * (22 - audio.shape[-1] / sr) * speed
-        )
-        gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
-
-        batch_process = infer_batch_process if batch_process_type == "classic" else brand_new_infer_batch_process
-        ref_payload = (audio, sr)
+    # Split the input text into batches
+    audio, sr = torchaudio.load(ref_audio)
+    max_chars = int(len(ref_text.encode("utf-8")) / (audio.shape[-1] / sr) * (22 - audio.shape[-1] / sr) * speed)
+    gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
 
     show_info(f"Generating audio in {len(gen_text_batches)} batches...")
 
+    batch_process = infer_batch_process if batch_process_type == "classic" else brand_new_infer_batch_process
+
     return next(
         batch_process(
-            ref_payload,
+            (audio, sr),
             ref_text,
             gen_text_batches,
             model_obj,
@@ -700,15 +683,8 @@ def brand_new_infer_batch_process(
                 # мел-кусок только после промпта: [n_mels, T_cont]
                 mel_k = out[k, lens_tensor[k] : dur_k, :].permute(1, 0).contiguous()  # -> [d, T]
 
-                dev = getattr(vocoder, "device", mel_k.device)
-                dt  = getattr(vocoder, "dtype",  mel_k.dtype)
-                try:
-                    p = next(vocoder.parameters())
-                    dev = getattr(p, "device", dev)
-                    dt  = getattr(p, "dtype",  dt)
-                except Exception:
-                    pass
-                mel_k = mel_k.to(device=dev, dtype=dt)
+                p = next(vocoder.parameters())
+                mel_k = mel_k.to(device=p.device, dtype=p.dtype)
 
                 # декодер ожидает [B, n_mels, T]
                 wav_k = vocoder.decode(mel_k.unsqueeze(0))  # -> [1, n_samples] (torch)
@@ -771,163 +747,6 @@ def brand_new_infer_batch_process(
                 )
 
         combined_spectrogram = np.concatenate(spectrograms, axis=1)  # по времени
-
-        yield final_wave, target_sample_rate, combined_spectrogram
-
-
-
-def brand_new_infer_batch_process_mel(
-    ref_mel,
-    ref_text,
-    gen_text_batches,
-    model_obj,
-    vocoder,
-    progress=tqdm,
-    target_rms=0.1,
-    cross_fade_duration=0.15,
-    nfe_step=32,
-    cfg_strength=2.0,
-    sway_sampling_coef=-1,
-    speed=1,
-    fix_duration=None,
-    device=None,
-    streaming=False,
-    chunk_size=2048,
-):
-    def _tqdm(it):
-        if progress is None:
-            return it
-
-        return progress.tqdm(it) if hasattr(progress, "tqdm") else it
-
-    if len(ref_text[-1].encode("utf-8")) == 1:
-        ref_text = ref_text + " "
-
-    if not torch.is_tensor(ref_mel):
-        ref_mel = torch.tensor(ref_mel)
-
-    if ref_mel.dim() == 2:
-        ref_mel = ref_mel.unsqueeze(0)
-
-    ref_mel = ref_mel.to(device)
-    ref_frames = ref_mel.shape[1]
-
-    def estimate_frames(gen_text: str) -> int:
-        local_speed = 0.3 if len(gen_text.encode("utf-8")) < 10 else speed
-        if fix_duration is not None:
-            dur = int(fix_duration * target_sample_rate / hop_length)
-        else:
-            rtl = max(len(ref_text.encode("utf-8")), 1)
-            gtl = len(gen_text.encode("utf-8"))
-            dur = ref_frames + int(ref_frames / rtl * gtl / max(local_speed, 1e-3))
-        return max(dur, ref_frames + 1)
-
-    items = []
-    for i, t in enumerate(gen_text_batches):
-        items.append((i, t, estimate_frames(t)))
-
-    if not items:
-        yield None, target_sample_rate, None
-        return
-
-    buckets = defaultdict(list)
-    for idx, t, est in items:
-        key = int(round(est / 256))
-        buckets[key].append((idx, t, est))
-
-    bucket_order = sorted(buckets.keys(), key=lambda k: min(i for i, _, _ in buckets[k]))
-    total = len(items)
-    waves_by_index = [None] * total
-    mels_by_index = [None] * total
-    next_to_yield = 0
-
-    for bkey in bucket_order:
-        bucket = buckets[bkey]
-        chunks = [bucket[i : i + 4] for i in range(0, len(bucket), 4)]
-
-        for chunk in _tqdm(chunks):
-            idxs = [i for i, _, _ in chunk]
-            texts = [ref_text + (" " if ref_text[-1] != " " else "") + t for _, t, _ in chunk]
-            lens = [ref_frames] * len(chunk)
-            durations = torch.tensor([est for _, _, est in chunk], device=device, dtype=torch.long)
-            lens_tensor = torch.tensor(lens, device=device, dtype=torch.long)
-            cond_batch = ref_mel.expand(len(chunk), -1, -1)
-
-            with torch.no_grad():
-                out, _traj = model_obj.sample(
-                    cond=cond_batch,
-                    text=texts,
-                    duration=durations,
-                    lens=lens_tensor,
-                    steps=nfe_step,
-                    cfg_strength=cfg_strength,
-                    sway_sampling_coef=sway_sampling_coef,
-                    vocoder=None,
-                )
-                del _traj
-
-            for k in range(len(chunk)):
-                dur_k = int(durations[k].item())
-                mel_k = out[k, lens_tensor[k] : dur_k, :].permute(1, 0).contiguous()
-
-                dev = getattr(vocoder, "device", mel_k.device)
-                dt = getattr(vocoder, "dtype", mel_k.dtype)
-                try:
-                    p = next(vocoder.parameters())
-                    dev = getattr(p, "device", dev)
-                    dt = getattr(p, "dtype", dt)
-                except Exception:
-                    pass
-                mel_k = mel_k.to(device=dev, dtype=dt)
-
-                wav_k = vocoder.decode(mel_k.unsqueeze(0))
-                wav_np = wav_k.squeeze(0).detach().cpu().numpy()
-                mel_np = mel_k.detach().cpu().numpy()
-                waves_by_index[idxs[k]] = wav_np
-                mels_by_index[idxs[k]] = mel_np
-
-            if streaming:
-                while next_to_yield < total and waves_by_index[next_to_yield] is not None:
-                    w = waves_by_index[next_to_yield]
-                    for j in range(0, len(w), chunk_size):
-                        yield w[j : j + chunk_size], target_sample_rate
-                    next_to_yield += 1
-
-    if not streaming:
-        generated_waves = [w for w in waves_by_index if w is not None]
-        spectrograms = [m for m in mels_by_index if m is not None]
-
-        if not generated_waves:
-            yield None, target_sample_rate, None
-            return
-
-        if cross_fade_duration <= 0:
-            final_wave = np.concatenate(generated_waves)
-        else:
-            final_wave = generated_waves[0]
-            for i in range(1, len(generated_waves)):
-                prev_wave = final_wave
-                next_wave = generated_waves[i]
-
-                cross_fade_samples = int(cross_fade_duration * target_sample_rate)
-                cross_fade_samples = min(cross_fade_samples, len(prev_wave), len(next_wave))
-                if cross_fade_samples <= 0:
-                    final_wave = np.concatenate([prev_wave, next_wave])
-                    continue
-
-                prev_overlap = prev_wave[-cross_fade_samples:]
-                next_overlap = next_wave[:cross_fade_samples]
-
-                fade_out = np.linspace(1.0, 0.0, cross_fade_samples, dtype=prev_wave.dtype)
-                fade_in = np.linspace(0.0, 1.0, cross_fade_samples, dtype=next_wave.dtype)
-
-                cross_faded_overlap = prev_overlap * fade_out + next_overlap * fade_in
-
-                final_wave = np.concatenate(
-                    [prev_wave[:-cross_fade_samples], cross_faded_overlap, next_wave[cross_fade_samples:]]
-                )
-
-        combined_spectrogram = np.concatenate(spectrograms, axis=1)
 
         yield final_wave, target_sample_rate, combined_spectrogram
 

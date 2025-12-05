@@ -68,6 +68,12 @@ def main():
         device=cfg.env.device,
     )
 
+    # Ensure the model weights match the requested precision. The inference loader
+    # defaults to half-precision on capable GPUs, which can clash with full-precision
+    # training inputs and cause dtype mismatch errors.
+    if not cfg.env.fp16:
+        tts.model = tts.model.float()
+
     train_dataset = ManifestDataset(
         cfg.data.train_manifest,
         target_sample_rate=tts.model.mel_spec.target_sample_rate,

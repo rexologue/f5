@@ -107,6 +107,7 @@ def main():
 
     logger = create_logger(cfg.neptune)
 
+    resume_state = None
     if cfg.paths.init_checkpoint is not None:
         resume_state = load_initial_checkpoint(cfg.paths.init_checkpoint)
 

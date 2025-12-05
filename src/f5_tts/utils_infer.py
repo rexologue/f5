@@ -327,7 +327,8 @@ def infer_process(
     max_chars = int(len(ref_text.encode("utf-8")) / (audio.shape[-1] / sr) * (22 - audio.shape[-1] / sr) * speed)
     gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
 
-    show_info(f"Generating audio in {len(gen_text_batches)} batches...")
+    if show_info:
+        show_info(f"Generating audio in {len(gen_text_batches)} batches...")
 
     batch_process = infer_batch_process if batch_process_type == "classic" else brand_new_infer_batch_process
 

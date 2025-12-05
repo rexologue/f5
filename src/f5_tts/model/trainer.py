@@ -201,7 +201,7 @@ class Trainer:
                 continue
             
             sample_id, text = row[0], row[1]
-            filename = f"sample_{sample_id}.wav"
+            filename = samples_dir / f"sample_{sample_id}.wav"
             
             _, _, _ = self.tts.infer(
                 ref_file=self.sampling_cfg.ref_audio_path,
